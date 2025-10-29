@@ -1,0 +1,50 @@
+[project]
+name = "burpai"
+version = "1.0.0"
+description = "Proxy that intercepts and processes Burp AI requests using a custom LLM instance"
+requires-python = "==3.13.*"
+dependencies = [
+    "mitmproxy",
+    "httpx",
+    "psutil",
+    "keyring",
+    "openai",
+    "rich",
+    "jsonschema",
+]
+
+[project.scripts]
+burpai = "src.main:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "ruff",
+    "uv-secure",
+    "pytest",
+    "pytest-mock",
+    "pytest-cov",
+]
+build = [
+    "pyinstaller",
+]
+
+[tool.uv]
+default-groups = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+addopts = [
+    "--cov=src",
+    "--cov-branch",
+    "--cov-report=term-missing",
+    "--cov-report=html",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:pyasn1.codec.ber.encoder",
+]

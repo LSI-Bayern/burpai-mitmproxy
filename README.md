@@ -7,55 +7,84 @@ modifying and proxying the requests to a OpenAI-compatible API backend that can
 be managed by organizations themselves, and thus avoid sending sensitive data to
 Portswigger and the US.
 
-The proxy denies all requests `ai.portswigger.net` if `debug` is not enabled
-(the default). In `debug` mode the proxy forwards the requests to Portswigger,
-and logs the requests and responses in the console.
-
-Currently working features are
+Currently working features are:
 
 - Explain this
 - API extensions use (Shadow Repeater has been tested)
+- Repeater and Explore Issue
+
+Currently missing features are:
+
+- AI recorded login
+- BAC false positive reduction
+
+For now, tests are also incomplete.
 
 See `Contributing` below for more information on how to contribute.
 
 ## Installation
 
 - Clone the repo
-- Install `mitmproxy`
-- Start `mitmproxy` with for example `mitmdump --listen-port 9001` to have
-  `mitmproxy` create TLS certificates. Certificates are placed in
-  `~/.mitmproxy` on Unix-based systems.
-- Import the `mitmproxy` CA certificate to the Burp Suite CA certificate
-  container. This step varies by OS.
-  - MacOS: `keytool -importcert -alias mitmproxy -keystore /Applications/Burp\ Suite\ Professional.app/Contents/Resources/jre.bundle/Contents/Home/lib/security/cacerts -file ~/.mitmproxy/mitmproxy-ca-cert.cer`
+- Install uv: https://docs.astral.sh/uv/getting-started/installation/
+
+### (Optional) Build with PyInstaller
+
+- `uv sync --group build`
+- `uv run python -m PyInstaller burpai.spec --clean --noconfirm`
+
+Environment variables:
+
+- `LLM_URL`: Hardcode default LLM URL
+- `ONEDIR`: Create a one-folder bundle instead of the default one-file bundle
 
 ## Running
 
-- Start the proxy: `mitmdump --listen-port 9001 --script proxy.py --set url=<open ai chat completions URL> --set api_key=<your API key>`
-- Configure a HTTP Proxy in Burp and point it to the running `mitmproxy`.
+- As simple as: `uv run burpai`
+- Alternatively run it via the PyInstaller build
 
 ## Configuration
 
-Configuration options are described below. They are set with
-`--set option=value` command line parameters for `mitmdump`.
+Configuration is stored in `~/.config/burpai/settings.json` (Linux) or
+equivalent on other platforms. The main settings are prompted interactively. API
+keys are saved in the system keyring unless specified via the command line.
 
-- `url`: The URL for the AI backend. This expects to be the full URL to an
-  OpenAI-compatible `/v1/chat/completions` API.
-- `api_key`: The Open AI compatible API key
-- `debug`: Whether to enable debug. In debug mode the proxy will output all
-  original and modified requests and their responses. Additionally, the proxy
-  will forward the requests that it is unable to handle to the Burp AI backend
-  so the requests and responses can be monitored. This is mainly for
-  development. Defaults to `false`.
-- `model`: Defines the AI model to use. Defaults to `gpt-4o`.
-- `request_headers_denylist`: A comma-separated list of regex header names that
-  are removed from the requests to the Open AI backend. Defaults to
-  `Portswigger-Burp-Ai-Token`.
-- `response_headers_denylist`: A comma-separated list of header regex names that
-  are removed from the responses. Defaults to empty.
+On first run, Burp Suite Pro is automatically configured to:
+
+- Enable AI feature
+- Configure upstream proxy
+- Install CA certificate
+
+Managing configuration:
+
+- View all options: `burpai --help`
+- Edit settings file: `burpai --settings` (respects `$EDITOR`, otherwise uses
+  common editors)
+- Command-line arguments override `settings.json` (e.g.,
+  `burpai --model qwen3-coder:30b`)
+
+## Example: Ollama with extended context
+
+Ollama's default context size is 2048 tokens. For larger contexts, either set
+`OLLAMA_CONTEXT_LENGTH` or create a custom model
+([Ollama FAQ](https://docs.ollama.com/faq#how-can-i-specify-the-context-window-size%3F)).
+
+Example using a custom model:
+
+```bash
+ollama pull qwen3-coder:30b
+ollama create qwen3-coder:30b-32k -f <(cat <<'EOF'
+FROM qwen3-coder:30b
+RENDERER qwen3-coder
+PARSER qwen3-coder
+PARAMETER num_ctx 32000
+EOF
+)
+```
 
 ## Contributing
 
 Currently only a subset of Burp's functionality has been implemented. I'm
 hoping to receive PRs for additional request examples (see `doc/requests.md`) as
 well as implementations for them.
+
+For development, install dev dependencies: `uv sync --group dev`

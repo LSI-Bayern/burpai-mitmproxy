@@ -1,4 +1,8 @@
 __pycache__/
 .venv/
-start-proxy.sh
 .DS_Store
+venv/
+build/
+dist/
+Pipfile
+.coverage
