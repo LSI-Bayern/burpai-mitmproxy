@@ -2,7 +2,7 @@ import json
 
 import keyring
 from keyring.backends import fail, null
-from keyring.errors import KeyringError, PasswordDeleteError
+from keyring.errors import PasswordDeleteError
 
 from .utils import logger
 

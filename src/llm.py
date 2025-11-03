@@ -212,7 +212,8 @@ class LLM:
             if is_last_attempt:
                 error_summary = ", ".join(validation_errors)
                 raise ValueError(
-                    f"Failed to generate valid tool calls after {self.max_tool_call_retries} attempts. Errors: {error_summary}"
+                    f"Failed to generate valid tool calls after "
+                    f"{self.max_tool_call_retries} attempts. Errors: {error_summary}"
                 )
 
             # Retry with feedback for failed tool calls only
