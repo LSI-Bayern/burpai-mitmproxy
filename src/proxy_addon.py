@@ -7,6 +7,7 @@ from .utils import logger
 
 import mitmproxy.http
 import mitmproxy.proxy.server_hooks
+import mitmproxy.tls
 
 from . import responses
 from .prompts.explain import ExplainThisPrompt
@@ -44,6 +45,9 @@ class ProxyAddon:
 
         if not await self._llm.check_llm_setup():
             sys.exit(1)
+
+        self._backend_url = urllib.parse.urlparse(self._llm.base_url)
+        self._backend_is_tls = self._backend_url.scheme == "https"
 
         self._explain_prompt = ExplainThisPrompt(self)
         self._montoya_prompt = MontoyaPrompt(self)
@@ -112,17 +116,28 @@ class ProxyAddon:
             logger.warning("This response was unhandled in burpai-proxy")
 
     def server_connect(self, data: mitmproxy.proxy.server_hooks.ServerConnectionHookData) -> None:
-        """Redirect upstream connection to prevent connection failures."""
+        """Redirect Burp AI upstream traffic to the configured backend."""
         if self._passthrough:
             return
 
-        host, _ = data.server.address if data.server.address else ("", 0)
+        host, _ = data.server.address
         if host != self._burp_ai_domain:
             return
 
-        backend_url = urllib.parse.urlparse(self._llm.base_url)
-        port = backend_url.port or (443 if backend_url.scheme == "https" else 80)
-        data.server.address = (str(backend_url.hostname), port)
-        data.server.tls = backend_url.scheme == "https"
+        port = self._backend_url.port or (443 if self._backend_is_tls else 80)
+        data.server.address = (str(self._backend_url.hostname), port)
+        data.server.tls = self._backend_is_tls
         if data.server.tls:
-            data.server.sni = backend_url.hostname
+            data.server.sni = self._backend_url.hostname
+
+    def tls_clienthello(self, data: mitmproxy.tls.ClientHelloData) -> None:
+        """Disable upstream TLS when the backend is plain HTTP."""
+        if self._passthrough or self._backend_is_tls:
+            return
+
+        server = data.context.server
+        host, _ = server.address
+        backend_host = self._backend_url.hostname
+        if host in {self._burp_ai_domain, backend_host}:
+            data.establish_server_tls_first = False
+            server.tls = False
