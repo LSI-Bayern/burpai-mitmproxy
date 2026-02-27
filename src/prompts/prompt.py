@@ -10,7 +10,7 @@ from openai import APIError
 from src.utils import logger
 
 
-class Role(str, enum.Enum):
+class Role(enum.StrEnum):
     SYSTEM = "system"
     USER = "user"
 
