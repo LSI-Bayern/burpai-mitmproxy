@@ -60,7 +60,7 @@ Managing configuration:
 - Edit settings file: `burpai --settings` (respects `$EDITOR`, otherwise uses
   common editors)
 - Command-line arguments override `settings.json` (e.g.,
-  `burpai --model qwen3-coder:30b`)
+  `burpai --model qwen3-coder-next:q8_0-128k`)
 
 ## Example: Ollama with extended context
 
@@ -71,11 +71,9 @@ Ollama's default context size is 2048 tokens. For larger contexts, either set
 Example using a custom model:
 
 ```bash
-ollama pull qwen3-coder:30b
-ollama create qwen3-coder:30b-32k -f <(cat <<'EOF'
-FROM qwen3-coder:30b
-RENDERER qwen3-coder
-PARSER qwen3-coder
+ollama pull qwen3-coder-next:q8_0
+ollama create qwen3-coder-next:q8_0-128k -f <(cat <<'EOF'
+FROM qwen3-coder-next:q8_0
 PARAMETER num_ctx 32000
 EOF
 )
