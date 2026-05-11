@@ -20,7 +20,7 @@ class Burp:
         self.mitmproxy_config_dir = Path(config["mitmproxy_config_dir"]).expanduser()
 
         self.cert_path = self.mitmproxy_config_dir / "mitmproxy-ca-cert.cer"
-        self.burp_config_path = self.burpsuite_config_dir / "UserConfigPro.json"
+        self.burp_config_path = self.burpsuite_config_dir / "UserConfig.json"
 
         self.expected_proxy_server = {
             "destination_host": "ai.portswigger.net",
