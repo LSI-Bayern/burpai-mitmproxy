@@ -27,6 +27,7 @@ dev = [
     "pytest",
     "pytest-mock",
     "pytest-cov",
+    "aiohttp",
 ]
 build = [
     "pyinstaller",
@@ -45,6 +46,12 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-report=html",
 ]
+markers = [
+    "e2e: end-to-end tests with real proxy",
+]
 filterwarnings = [
-    "ignore::DeprecationWarning:pyasn1.codec.ber.encoder",
+    "ignore::DeprecationWarning:pyasn1",
+    "ignore::DeprecationWarning:ldap3",
+    "ignore::DeprecationWarning:mitmproxy",
+    "ignore::DeprecationWarning:pyparsing",
 ]
