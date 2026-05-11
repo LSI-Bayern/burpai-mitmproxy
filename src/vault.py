@@ -16,7 +16,7 @@ class Vault:
         self.is_available = self._get_availability()
 
         if not self.is_available:
-            logger.info("System keyring will not be used")
+            logger.info("System keyring service is not running or unavailable")
 
     def get(self, key):
         """Return secret or None."""
