@@ -24,6 +24,7 @@ class Session:
     internal_tool_results: dict[str, dict] = field(default_factory=dict)
     issue_definition: dict = field(default_factory=dict)
     is_finishing: bool = False
+    is_finalized: bool = False
 
 
 class SessionManager:
@@ -56,6 +57,12 @@ class SessionManager:
         if session_id in self._sessions:
             logger.info("Session %s: Deleted", display_sessid(session_id))
             del self._sessions[session_id]
+
+    def finalize_session(self, session_id: str) -> None:
+        session = self._sessions.get(session_id)
+        if session and not session.is_finalized:
+            session.is_finalized = True
+            logger.info("Session %s: Finalized", display_sessid(session_id))
 
     def process_session_response(
         self,

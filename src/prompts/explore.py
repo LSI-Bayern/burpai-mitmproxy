@@ -184,6 +184,10 @@ class ExplorePrompt(Prompt):
             logger.error("Session %s: Unknown/expired session", display_sessid(session_id))
             flow.response = self._json_response(HTTPStatus.BAD_REQUEST, {"error": "Unknown session_id"})
             return
+        if session.is_finalized:
+            logger.info("Session %s: Request after finalization, ignoring", display_sessid(session_id))
+            flow.response = self._json_response(HTTPStatus.BAD_REQUEST, {"error": "Session already finalized"})
+            return
 
         user_message = None
         if session.needs_history_clear:
@@ -221,6 +225,10 @@ class ExplorePrompt(Prompt):
         if not session:
             logger.error("Session %s: Unknown/expired session", display_sessid(session_id))
             flow.response = self._json_response(HTTPStatus.BAD_REQUEST, {"error": "Unknown session_id"})
+            return
+        if session.is_finalized:
+            logger.info("Session %s: Finish request after finalization, ignoring", display_sessid(session_id))
+            flow.response = self._json_response(HTTPStatus.BAD_REQUEST, {"error": "Session already finalized"})
             return
 
         step = self._create_step(session_id, expose_exploration_id_while_running=True)
@@ -267,6 +275,13 @@ class ExplorePrompt(Prompt):
         session = self.sessions.get_session(previous_step.exploration_id)
         if not session:
             flow.response = self._json_response(HTTPStatus.BAD_REQUEST, {"error": "Unknown session_id"})
+            return
+        if session.is_finalized:
+            logger.info(
+                "Session %s: Retry after finalization, ignoring",
+                display_sessid(previous_step.exploration_id),
+            )
+            flow.response = self._json_response(HTTPStatus.BAD_REQUEST, {"error": "Session already finalized"})
             return
 
         previous_step.retry_count += 1
@@ -340,6 +355,16 @@ class ExplorePrompt(Prompt):
             step.state = self.failed_state
             step.error = "Unknown session_id"
             return
+        if session.is_finalized:
+            logger.info("Session %s: Step started after finalization, completing as no-op", display_sessid(session_id))
+            step.response = {
+                "exploration_id": session_id,
+                "step_title": "",
+                "step_action": "",
+                "tool_calls": [],
+            }
+            step.state = "COMPLETE"
+            return
 
         if is_finishing:
             session.is_finishing = True
@@ -373,7 +398,7 @@ class ExplorePrompt(Prompt):
             step.state = "COMPLETE"
 
             if should_delete_session and step.exploration_id:
-                self.sessions.delete_session(step.exploration_id)
+                self.sessions.finalize_session(step.exploration_id)
         except Exception as e:  # noqa: BLE001
             step.state = self._failure_state_for_exception(e)
             step.error = str(e)
@@ -381,10 +406,19 @@ class ExplorePrompt(Prompt):
 
     async def _run_llm_until_burp_tool(self, session_id: str) -> tuple[dict[str, Any], bool]:
         """Handle LLM response, looping until Burp tools are used."""
+        empty_response = {
+            "exploration_id": session_id,
+            "step_title": "",
+            "step_action": "",
+            "tool_calls": [],
+        }
         while True:
             session = self.sessions.get_session(session_id)
             if not session:
                 raise KeyError(f"Unknown session_id: {session_id}")
+            if session.is_finalized:
+                logger.info("Session %s: Step aborted after finalization", display_sessid(session_id))
+                return empty_response, False
 
             self._refresh_session_messages(session_id)
             llm_request = self.build_session_request(session_id, self._get_tools_for_request(session_id))
@@ -403,6 +437,9 @@ class ExplorePrompt(Prompt):
             session = self.sessions.get_session(session_id)
             if not session:
                 raise KeyError(f"Unknown session_id: {session_id}")
+            if session.is_finalized:
+                logger.info("Session %s: Step aborted after finalization", display_sessid(session_id))
+                return empty_response, False
 
             # Clear history if needed
             if session.needs_history_clear:
