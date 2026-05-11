@@ -227,3 +227,114 @@ async def test_response_headers_present(fake_llm, burp):
 
     status_resp = await burp.explore_status(step_id)
     assert "Portswigger-Hakawai-Ai" in status_resp.headers
+
+
+async def test_context_compression_flow(fake_llm, burp):
+    # Start with usage above 70% of token_limit (100000) to flag history for clearing
+    fake_llm.enqueue_response(
+        repeater_response("tool-1"),
+        usage={"prompt_tokens": 80000, "completion_tokens": 100, "total_tokens": 80100},
+    )
+    resp = await burp.explore_start(SAMPLE_ISSUE)
+    start_status = await burp.poll_until_terminal(resp.json()["step_id"])
+    exploration_id = start_status["response"]["exploration_id"]
+    tool_id = start_status["response"]["tool_calls"][0]["id"]
+
+    # Continue: first LLM call gets only update_files, second gets normal tools after clear
+    fake_llm.enqueue_response({
+        "content": "",
+        "tool_calls": [make_tool_call("files-1", "update_files", {
+            "operations": [{"action": "append", "filename": "findings.md", "content": "\nSaved context"}],
+        })],
+    })
+    fake_llm.enqueue_response(repeater_response("tool-2"))
+
+    resp = await burp.explore_continue(
+        exploration_id,
+        [{"tool_id": tool_id, "result": "HTTP/1.1 200 OK\r\n\r\nOK"}],
+    )
+    status = await burp.poll_until_terminal(resp.json()["step_id"])
+    assert status["state"] == "COMPLETE"
+
+    pre_clear_req = fake_llm.received_requests[1]
+    assert [t["function"]["name"] for t in pre_clear_req["tools"]] == ["update_files"]
+    assert any(
+        m.get("role") == "user" and "CONTEXT WINDOW FULL" in (m.get("content") or "")
+        for m in pre_clear_req["messages"]
+    )
+
+    # History cleared, so the next LLM call has fewer messages
+    post_clear_req = fake_llm.received_requests[2]
+    assert len(post_clear_req["messages"]) < len(pre_clear_req["messages"])
+
+
+async def test_retry_exhaustion_returns_explore_failed(fake_llm, burp):
+    fake_llm.enqueue_response({
+        "content": "",
+        "tool_calls": [make_tool_call("bad-0", "nonexistent_tool", {})],
+    })
+    resp = await burp.explore_start(SAMPLE_ISSUE)
+    status = await burp.poll_until_terminal(resp.json()["step_id"])
+    assert status["state"] == "ERROR"
+    original_step_id = status["step_id"]
+
+    for i in range(5):
+        fake_llm.enqueue_response({
+            "content": "",
+            "tool_calls": [make_tool_call(f"bad-{i+1}", "nonexistent_tool", {})],
+        })
+        retry_resp = await burp.explore_retry(original_step_id)
+        await burp.poll_until_terminal(retry_resp.json()["step_id"])
+
+    final = await burp.explore_status(original_step_id)
+    assert final.json()["state"] == "EXPLORE_FAILED"
+
+
+async def test_reporter_unlocks_when_all_tasks_completed(fake_llm, burp):
+    # Start: add a task, then call repeater. Reporter must not be offered yet.
+    fake_llm.enqueue_response({
+        "content": "",
+        "tool_calls": [make_tool_call("tasks-1", "update_tasks", {
+            "operations": [{"action": "add", "title": "Probe endpoint"}],
+        })],
+    })
+    fake_llm.enqueue_response(repeater_response("tool-1"))
+
+    resp = await burp.explore_start(SAMPLE_ISSUE)
+    start_status = await burp.poll_until_terminal(resp.json()["step_id"])
+    exploration_id = start_status["response"]["exploration_id"]
+    tool_id = start_status["response"]["tool_calls"][0]["id"]
+
+    start_tools = [t["function"]["name"] for t in fake_llm.received_requests[0]["tools"]]
+    assert "reporter" not in start_tools
+
+    # Continue: complete the task, reporter unlocks on the next iteration
+    fake_llm.enqueue_response({
+        "content": "",
+        "tool_calls": [make_tool_call("tasks-2", "update_tasks", {
+            "operations": [{"action": "complete", "id": 0}],
+        })],
+    })
+    fake_llm.enqueue_response({
+        "content": "",
+        "tool_calls": [make_tool_call("reporter-1", "reporter", {
+            "step_title": "Final report",
+            "step_action": "Summarize findings",
+            "report": "Testing complete.",
+        })],
+    })
+
+    resp = await burp.explore_continue(
+        exploration_id,
+        [{"tool_id": tool_id, "result": "HTTP/1.1 200 OK\r\n\r\nOK"}],
+    )
+    status = await burp.poll_until_terminal(resp.json()["step_id"])
+    assert status["state"] == "COMPLETE"
+    assert status["response"]["tool_calls"][0]["tool_name"] == "reporter"
+
+    final_tools = [t["function"]["name"] for t in fake_llm.received_requests[-1]["tools"]]
+    assert "reporter" in final_tools
+
+    # Session should be deleted after reporter, so continue returns 400
+    resp = await burp.explore_continue(exploration_id, [])
+    assert resp.status_code == 400
