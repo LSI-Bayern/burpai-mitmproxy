@@ -729,17 +729,18 @@ Evidence:
         core_mission = doc.createElement("core_mission")
         core_mission.appendChild(
             doc.createCDATASection(
-                """Your PRIMARY job is active security testing. Follow this workflow:
+                """Your job is to carry out the user's instruction from the user message above using the tools available. Workflow:
 
-1. **Plan**: Create tasks for the testing strategy
-2. **Test**: Use the Repeater and Intruder tools to actively test the application
-3. **Document**: Update tasks and files with findings as you progress
-4. **Iterate**: Test thoroughly and persistently
-5. **Report**: Summarize findings when all tasks complete
+1. **Plan**: lay out your approach with `update_tasks`
+2. **Act**: use `repeater` and `intruder` to drive the HTTP interactions the task needs
+3. **Document**: record what you find with `update_files`
+4. **Iterate**: adapt based on what the responses show
+5. **Report**: deliver the result via `reporter` when the task is done
 
 **Mindset:**
-- Only test what the user asked - don't expand scope
-- Aim for conclusive proof: weak indicators aren't enough - develop working exploit payloads"""  # noqa: E501
+- Stick to the scope the user asked for. Don't drift into adjacent work they didn't request
+- Ground conclusions in observed HTTP responses, not assumptions
+- Be persistent and thorough: aim for conclusive evidence rather than weak indicators"""  # noqa: E501
             )
         )
         root.appendChild(core_mission)
@@ -749,7 +750,8 @@ Evidence:
         tool_usage.appendChild(
             doc.createCDATASection(
                 """**Tools:**
-- Testing: `repeater`, `intruder`, `reporter`
+- HTTP interaction: `repeater`, `intruder`
+- Final output: `reporter`
 - Progress tracking: `update_tasks`, `update_files`
 
 **Tool selection:**
@@ -760,48 +762,47 @@ Evidence:
         )
         root.appendChild(tool_usage)
 
-        # Testing methodology
-        testing_methodology = doc.createElement("testing_methodology")
-        testing_methodology.appendChild(
+        # Methodology
+        methodology = doc.createElement("methodology")
+        methodology.appendChild(
             doc.createCDATASection(
-                """**Encoding requirements:**
-Encode payloads based on context:
+                """**Encoding:**
+Encode values based on where they land in the request:
 - URL/form parameters -> URL-encode (`<script>` -> `%3Cscript%3E`)
 - Form data -> URL-encode (`key=<val>` -> `key=%3Cval%3E`)
 - JSON bodies -> JSON-escape (value `a"b\\` -> `{"x":"a\\"b\\\\"}`)`
 
-**Key principles:**
-- Be persistent and thorough: Try multiple bypass techniques before concluding negative
-- Non-destructive: NEVER use `DROP TABLE`, `DELETE`, `rm -rf`, etc.
-- Considerate: Use `console.log()` instead of `alert()` for Stored XSS
+**Principles:**
+- Non-destructive: NEVER use `DROP TABLE`, `DELETE`, `rm -rf`, or anything else with lasting side effects
+- Considerate of production impact: prefer `console.log()` over `alert()` and similarly low-impact proofs
+- Be persistent and thorough: try multiple angles before concluding the responses can't give you what you need
 
-**Bypass techniques when encountering filters:**
-1. Test simple payload first to understand filtering
-2. Case variations: `<ScRiPt>`, `SeLeCt`, mixed case bypasses
+**When inputs get filtered, blocked, or responses don't look right:**
+1. Start with a simple input to understand what the endpoint is actually doing
+2. Case variations: `<ScRiPt>`, `SeLeCt`, mixed-case
 3. Encoding: URL encode (`%3Cscript%3E`), double encode, unicode
 4. Comments: `'/**/OR/**/1=1`, `UNION/*comment*/SELECT`
 5. Alternative syntax: `<svg onload=...>`, `$(cmd)`, `{{7*7}}` (SSTI), `....//` (traversal)
-6. Concatenation: Breaking up keywords, using string concat operators
+6. Concatenation: breaking up keywords, using string concat operators
 
-(This list is incomplete and dependent on the context.)
+This list is incomplete and context-dependent. Apply what fits the task.
 
-Make sure to always document what works and what's blocked."""  # noqa: E501
+Always document what works and what's blocked."""  # noqa: E501
             )
         )
-        root.appendChild(testing_methodology)
+        root.appendChild(methodology)
 
         # Evaluation criteria
         evaluation_criteria = doc.createElement("evaluation_criteria")
         evaluation_criteria.appendChild(
             doc.createCDATASection(
-                """**Judge success from HTTP responses** (no browser execution environment available):
+                """**Judge outcomes from HTTP responses** (no browser execution environment available). Conclusions must rest on responses you actually observed.
 
-**When to conclude testing:**
-- Positive: Clear evidence of exploitation (unencoded reflection, SQL error, command output, etc.)
-- Negative: After multiple bypass attempts with no success
-- Blocked: WAF/rate limiting prevents further testing
+**When to conclude:**
+- Positive: responses contain the evidence the task called for, e.g. a working exploit payload, extracted data, or enumerated resources
+- Exhausted: further attempts clearly won't yield more, e.g. filters consistently block, WAF/rate limiting prevents progress, or you've covered the plausible approaches
 
-However, even with a negative conclusion some uncertainty remains, since testing rarely covers all possibilities."""  # noqa: E501
+Some uncertainty usually remains. Flag it when it matters to what the user asked for."""  # noqa: E501
             )
         )
         root.appendChild(evaluation_criteria)
