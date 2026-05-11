@@ -162,14 +162,43 @@ class LLM:
                 errors.append(f"Invalid JSON for '{tool_name}': {e.msg}")
                 continue
 
+            schema = tool_schema_map[tool_name]
+            if self._coerce_stringified_json(arguments, schema):
+                function_data["arguments"] = json.dumps(arguments)
+
             # Check if the schema was not respected
-            validator = Draft202012Validator(tool_schema_map[tool_name])
+            validator = Draft202012Validator(schema)
             validation_errors = list(validator.iter_errors(arguments))
             for e in validation_errors:
                 json_path = self._build_jsonpath(e.path)
                 errors.append(f"Invalid tool call for '{tool_name}' at '{json_path}': {e.message}")
 
         return errors
+
+    def _coerce_stringified_json(self, arguments: dict[str, Any], schema: dict[str, Any]) -> bool:
+        """Recover from local LLMs that stringify nested arrays/objects in tool arguments.
+
+        Mutates `arguments` in place. Returns True if any coercion happened.
+        """
+        if not isinstance(arguments, dict):
+            return False
+        properties = schema.get("properties", {})
+        coerced = False
+        for key, prop_schema in properties.items():
+            if key not in arguments:
+                continue
+            expected_type = prop_schema.get("type")
+            if expected_type not in ("array", "object"):
+                continue
+            value = arguments[key]
+            if not isinstance(value, str):
+                continue
+            try:
+                arguments[key] = json.loads(value)
+                coerced = True
+            except json.JSONDecodeError:
+                pass
+        return coerced
 
     def _validate_single_tool_response(self, message_obj: dict[str, Any], tools: list[dict[str, Any]]) -> None:
         tool_calls = message_obj.get("tool_calls")
