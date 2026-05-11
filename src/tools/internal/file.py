@@ -39,32 +39,15 @@ class FileTool(Tool):
         """Get the JSON schema for the update_files tool."""
         md_filename_pattern = r"^[a-zA-Z0-9_-]+\.md$"
 
-        append_file_op = {
-            "properties": {
-                "action": {"const": "append"},
-                "filename": {"type": "string", "pattern": md_filename_pattern},
-                "content": {"type": "string"},
-            },
-            "required": ["action", "filename", "content"],
-            "additionalProperties": False,
-        }
-
-        write_file_op = {
-            "properties": {
-                "action": {"const": "write"},
-                "filename": {"type": "string", "pattern": md_filename_pattern},
-                "content": {"type": "string"},
-            },
-            "required": ["action", "filename", "content"],
-            "additionalProperties": False,
-        }
-
-        file_ops_schema = {
+        file_op_schema = {
             "type": "object",
-            "anyOf": [
-                append_file_op,
-                write_file_op,
-            ],
+            "properties": {
+                "action": {"type": "string", "enum": ["append", "write"]},
+                "filename": {"type": "string", "pattern": md_filename_pattern},
+                "content": {"type": "string"},
+            },
+            "required": ["action", "filename", "content"],
+            "additionalProperties": False,
         }
 
         parameters_schema = {
@@ -73,7 +56,7 @@ class FileTool(Tool):
                 "operations": {
                     "type": "array",
                     "minItems": 1,
-                    "items": file_ops_schema,
+                    "items": file_op_schema,
                 },
             },
             "required": ["operations"],

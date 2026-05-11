@@ -33,49 +33,27 @@ class TaskTool(Tool):
         if session:
             task_count = len(session.tasks)
 
-        schema_items = [
-            {
-                "properties": {
-                    "action": {"const": "add"},
-                    "title": {"type": "string"},
-                },
-                "required": ["action", "title"],
-                "additionalProperties": False,
-            }
-        ]
-
-        # Add actions if we have tasks
+        action_values = ["add"]
         if task_count > 0:
-            id_schema = {"type": "integer", "minimum": 0, "maximum": task_count - 1}
+            action_values.extend(["complete", "reopen", "delete"])
 
-            schema_items.extend(
-                [
-                    {
-                        "properties": {
-                            "action": {"const": "complete"},
-                            "id": id_schema,
-                        },
-                        "required": ["action", "id"],
-                        "additionalProperties": False,
-                    },
-                    {
-                        "properties": {
-                            "action": {"const": "reopen"},
-                            "id": id_schema,
-                        },
-                        "required": ["action", "id"],
-                        "additionalProperties": False,
-                    },
-                    {
-                        "properties": {
-                            "action": {"const": "delete"},
-                            "id": id_schema,
-                        },
-                        "required": ["action", "id"],
-                        "additionalProperties": False,
-                    },
-                ]
-            )
+        operation_properties: dict[str, Any] = {
+            "action": {"type": "string", "enum": action_values},
+            "title": {"type": "string"},
+        }
+        if task_count > 0:
+            operation_properties["id"] = {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": task_count - 1,
+            }
+
+        operation_schema = {
+            "type": "object",
+            "properties": operation_properties,
+            "required": ["action"],
+            "additionalProperties": False,
+        }
 
         return {
             "type": "function",
@@ -88,10 +66,7 @@ class TaskTool(Tool):
                         "operations": {
                             "type": "array",
                             "minItems": 1,
-                            "items": {
-                                "type": "object",
-                                "anyOf": schema_items,
-                            },
+                            "items": operation_schema,
                         },
                     },
                     "required": ["operations"],
