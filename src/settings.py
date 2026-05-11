@@ -25,7 +25,6 @@ class SettingField:
 
 @dataclass
 class PlatformDefaults:
-    burpsuite_dir: str
     burpsuite_config_dir: str
     mitmproxy_config_dir: str
     burpai_config_path: str
@@ -90,10 +89,6 @@ class Settings:
             "port": SettingField(
                 type=int,
                 default=8765,
-            ),
-            "burpsuite_dir": SettingField(
-                type=Path,
-                default=platform_defaults.burpsuite_dir,
             ),
             "burpsuite_config_dir": SettingField(
                 type=Path,
@@ -339,19 +334,16 @@ class Settings:
         """Get platform-specific default paths."""
         defaults = {
             "Darwin": PlatformDefaults(
-                burpsuite_dir="/Applications/Burp Suite Professional.app",
                 burpsuite_config_dir="~/.BurpSuite",
                 mitmproxy_config_dir="~/Library/Application Support/mitmproxy",
                 burpai_config_path="~/Library/Application Support/burpai/settings.json",
             ),
             "Windows": PlatformDefaults(
-                burpsuite_dir="~/AppData/Local/Programs/BurpSuitePro",
                 burpsuite_config_dir="~/AppData/Roaming/BurpSuite",
                 mitmproxy_config_dir="~/.mitmproxy",
                 burpai_config_path="~/AppData/Roaming/burpai/settings.json",
             ),
             "Linux": PlatformDefaults(
-                burpsuite_dir="~/BurpSuitePro",
                 burpsuite_config_dir="~/.BurpSuite",
                 mitmproxy_config_dir="~/.mitmproxy",
                 burpai_config_path="~/.config/burpai/settings.json",

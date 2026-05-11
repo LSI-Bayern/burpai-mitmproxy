@@ -38,7 +38,6 @@ def mock_vault(mocker):
 def mock_platform_defaults(mocker, tmp_path):
     def get_defaults():
         return PlatformDefaults(
-            burpsuite_dir=str(tmp_path / "BurpSuitePro"),
             burpsuite_config_dir=str(tmp_path / ".BurpSuite"),
             mitmproxy_config_dir=str(tmp_path / ".mitmproxy"),
             burpai_config_path=str(tmp_path / ".config" / "burpai" / "settings.json"),
@@ -59,19 +58,19 @@ class TestSettingsInitialization:
 
     @pytest.mark.usefixtures("mock_vault")
     @pytest.mark.parametrize(
-        "platform_name,expected_burpsuite_dir",
+        "platform_name,expected_burpsuite_config_dir",
         [
-            ("Linux", "~/BurpSuitePro"),
-            ("Darwin", "/Applications/Burp Suite Professional.app"),
-            ("Windows", "~/AppData/Local/Programs/BurpSuitePro"),
+            ("Linux", "~/.BurpSuite"),
+            ("Darwin", "~/.BurpSuite"),
+            ("Windows", "~/AppData/Roaming/BurpSuite"),
         ],
     )
-    def test_platform_specific_defaults(self, mocker, platform_name, expected_burpsuite_dir):
+    def test_platform_specific_defaults(self, mocker, platform_name, expected_burpsuite_config_dir):
         mocker.patch("src.settings.platform.system", return_value=platform_name)
 
         settings = Settings()
 
-        assert settings.schema["burpsuite_dir"].default == expected_burpsuite_dir
+        assert settings.schema["burpsuite_config_dir"].default == expected_burpsuite_config_dir
 
 
 class TestCorruptedConfig:

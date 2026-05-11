@@ -95,7 +95,6 @@ def setup_argument_parser() -> argparse.ArgumentParser:
 
     # Configuration paths
     path_group = parser.add_argument_group("Configuration paths")
-    path_group.add_argument("--burpsuite-dir", metavar="PATH", help="Path to the BurpSuitePro installation directory")
     path_group.add_argument("--burpsuite-config-dir", metavar="PATH", help="Path to BurpSuite config directory")
     path_group.add_argument("--mitmproxy-config-dir", metavar="PATH", help="Path to mitmproxy config directory")
 
