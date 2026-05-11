@@ -1,4 +1,5 @@
 import json
+import ssl
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,6 @@ class LLM:
     default_model: str
     token_limit: int
     default_temperature: float = 1.0
-    max_tool_call_retries: int = 5
     proxy: str | None = None
     proxy_username: str | None = None
     proxy_password: str | None = None
@@ -77,8 +77,10 @@ class LLM:
         logger.info("Model [cyan]%s[/cyan] is available at %s", self.default_model, self.base_url)
         return True
 
-    async def request(self, payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
-        """Send chat completion request and return message object (with content/tool_calls) and usage info."""
+    async def request(
+        self, payload: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Send chat completion request and return message object and usage info."""
         if not self.base_url:
             raise ValueError("Base URL is not configured")
 
@@ -99,10 +101,10 @@ class LLM:
         if tools and "tool_choice" not in payload:
             payload["tool_choice"] = "required"
 
+        message_obj, usage_info = await self._make_llm_request(payload)
         if tools:
-            return await self._request_with_retry(payload, tools)
-
-        return await self._make_llm_request(payload)
+            self._validate_single_tool_response(message_obj, tools)
+        return message_obj, usage_info
 
     def _format_error(self, error: Exception) -> str:
         """Format error message, optionally with truncation."""
@@ -129,16 +131,13 @@ class LLM:
 
     def _validate_tool_calls(
         self, tool_calls: list[dict[str, Any]] | None, tool_schemas: list[dict[str, Any]]
-    ) -> tuple[list[str], list[dict[str, Any]], set[str], set[str]]:
+    ) -> list[str]:
         errors = []
-        valid_tool_calls = []
-        tools_with_successes = set()
-        tools_with_failures = set()
 
         # Some providers like Ollama don't support tool_choice="required", so we enforce it here
         if not tool_calls:
             errors.append("No tools called. You must select and call at least one tool to proceed.")
-            return errors, valid_tool_calls, tools_with_successes, tools_with_failures
+            return errors
 
         tool_schema_map = {}
         for tool in tool_schemas:
@@ -154,7 +153,6 @@ class LLM:
             # Check if the tool is available
             if tool_name not in tool_schema_map:
                 errors.append(f"Unknown tool '{tool_name}'")
-                tools_with_failures.add(tool_name)
                 continue
 
             # Check if the JSON is invalid
@@ -162,76 +160,22 @@ class LLM:
                 arguments = json.loads(arguments_json)
             except json.JSONDecodeError as e:
                 errors.append(f"Invalid JSON for '{tool_name}': {e.msg}")
-                tools_with_failures.add(tool_name)
                 continue
 
             # Check if the schema was not respected
             validator = Draft202012Validator(tool_schema_map[tool_name])
             validation_errors = list(validator.iter_errors(arguments))
-            if validation_errors:
-                for e in validation_errors:
-                    json_path = self._build_jsonpath(e.path)
-                    error_msg = f"Invalid tool call for '{tool_name}' at '{json_path}': {e.message}"
-                    errors.append(error_msg)
-                tools_with_failures.add(tool_name)
-            else:
-                valid_tool_calls.append(tool_call)
-                tools_with_successes.add(tool_name)
+            for e in validation_errors:
+                json_path = self._build_jsonpath(e.path)
+                errors.append(f"Invalid tool call for '{tool_name}' at '{json_path}': {e.message}")
 
-        return errors, valid_tool_calls, tools_with_successes, tools_with_failures
+        return errors
 
-    async def _request_with_retry(
-        self, payload: dict[str, Any], tools: list[dict[str, Any]]
-    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-        """Make LLM request with retry logic for invalid tool calls."""
-        message_obj: dict[str, Any] = {}
-        usage_info: dict[str, Any] | None = None
-        valid_tool_calls: list[dict[str, Any]] = []
-        fully_successful_tools: set[str] = set()
-
-        for attempt in range(max(1, self.max_tool_call_retries)):
-            message_obj, usage_info = await self._make_llm_request(payload)
-
-            tool_calls = message_obj.get("tool_calls")
-
-            # Validate and accumulate valid tool calls
-            validation_errors, newly_valid, tools_with_successes, tools_with_failures = self._validate_tool_calls(
-                tool_calls, tools
-            )
-            valid_tool_calls.extend(newly_valid)
-
-            # Only mark tools as "fully successful" if they had no failures
-            newly_fully_successful = tools_with_successes - tools_with_failures
-            fully_successful_tools.update(newly_fully_successful)
-
-            if not validation_errors:
-                break
-
-            # Handle validation errors
-            is_last_attempt = attempt >= self.max_tool_call_retries - 1
-            if is_last_attempt:
-                error_summary = ", ".join(validation_errors)
-                raise ValueError(
-                    f"Failed to generate valid tool calls after "
-                    f"{self.max_tool_call_retries} attempts. Errors: {error_summary}"
-                )
-
-            # Retry with feedback for failed tool calls only
-            logger.warning(
-                "Tool call validation failed (attempt %d/%d): %s",
-                attempt + 1,
-                self.max_tool_call_retries,
-                ", ".join(validation_errors),
-            )
-            payload = self._add_retry_feedback(payload, message_obj, validation_errors, fully_successful_tools)
-
-        # Replace with valid tool calls
-        if valid_tool_calls:
-            message_obj["tool_calls"] = valid_tool_calls
-        else:
-            raise ValueError("No valid tool calls were generated after retries")
-
-        return message_obj, usage_info
+    def _validate_single_tool_response(self, message_obj: dict[str, Any], tools: list[dict[str, Any]]) -> None:
+        tool_calls = message_obj.get("tool_calls")
+        validation_errors = self._validate_tool_calls(tool_calls, tools)
+        if validation_errors:
+            raise ValueError("\n".join(f"- {e}" for e in validation_errors))
 
     async def _make_llm_request(self, payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
         """Make a single LLM request and return message object and usage info."""
@@ -273,47 +217,7 @@ class LLM:
         self._log_context_usage(usage_info)
         return message_obj, usage_info
 
-    def _add_retry_feedback(
-        self,
-        payload: dict[str, Any],
-        message_obj: dict[str, Any],
-        validation_errors: list[str],
-        successful_tool_names: set[str],
-    ) -> dict[str, Any]:
-        """Add error feedback to payload for retry attempt."""
-        messages = payload.get("messages", [])
-        messages.append(message_obj)
-
-        feedback_parts = ["Your previous tool calls:"]
-
-        if successful_tool_names:
-            feedback_parts.append("")
-            feedback_parts.extend(
-                f"- '{tool_name}': Succeeded (already processed)" for tool_name in sorted(successful_tool_names)
-            )
-
-        if validation_errors:
-            feedback_parts.append("")
-            feedback_parts.extend(f"- {error}" for error in validation_errors)
-
-        feedback_parts.append("")
-        feedback_parts.append(
-            "Please fix the failed tool calls and retry them. Do not re-call tools that already succeeded."
-        )
-
-        error_content = "\n".join(feedback_parts)
-        messages.append({"role": "user", "content": error_content})
-
-        if successful_tool_names and "tools" in payload:
-            filtered_tools = [
-                tool for tool in payload["tools"] if tool.get("function", {}).get("name") not in successful_tool_names
-            ]
-            payload["tools"] = filtered_tools
-
-        payload["messages"] = messages
-        return payload
-
-    def _find_ssl_cert(self) -> str | bool:
+    def _find_ssl_cert(self) -> ssl.SSLContext | bool:
         """Find SSL certificate bundle, might be necessary for corporate environments."""
         cert_locations = [
             Path("/etc/ssl/certs/ca-certificates.crt"),
@@ -323,7 +227,7 @@ class LLM:
         ]
         for cert in cert_locations:
             if cert.exists():
-                return str(cert)
+                return ssl.create_default_context(cafile=str(cert))
         return True
 
     def _log_context_usage(self, usage_info: dict[str, Any]) -> None:

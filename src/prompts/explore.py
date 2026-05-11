@@ -1,32 +1,55 @@
+import asyncio
 import json
 import time
 import uuid
+from dataclasses import dataclass
+from http import HTTPStatus
 from typing import Any
 from xml.dom import minidom
 
 import mitmproxy.http
+from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError
 
 from src.conversation import ConversationMessage
 from src.session_manager import Session, SessionManager
-from .prompt import Prompt
-from openai import APIError
 from src.tools import TaskTool, FileTool, RepeaterTool, IntruderTool, ReporterTool
 from src.utils import logger, display_sessid
 
+from .prompt import Prompt
+
+
+@dataclass
+class ExploreStep:
+    step_id: str
+    exploration_id: str | None = None
+    state: str = "PENDING"
+    retry_count: int = 0
+    poll_interval_seconds: int = 5
+    response: dict[str, Any] | None = None
+    error: str | None = None
+    expose_exploration_id_while_running: bool = False
+    task: asyncio.Task | None = None
+
 
 class ExplorePrompt(Prompt):
-    """Handles /ai/hakawai-explore-service/api/v1/start, /continue, and /finish requests."""
+    """Handles async Burp exploration start/continue/finish/status requests."""
 
-    start_path = "/ai/hakawai-explore-service/api/v1/start"
-    continue_path = "/ai/hakawai-explore-service/api/v1/continue"
-    finish_path = "/ai/hakawai-explore-service/api/v1/finish"
+    start_path = "/ai/hakawai-explore-service/api/v1/async/start"
+    continue_path = "/ai/hakawai-explore-service/api/v1/async/continue"
+    finish_path = "/ai/hakawai-explore-service/api/v1/async/finish"
+    status_prefix = "/ai/hakawai-explore-service/api/v1/async/status/"
+    max_error_retries = 5
 
-    session_header_key = "X-Exploration-Id"
     session_id_key = "exploration_id"
+    failed_state = "ERROR"
+    exhausted_failed_state = "EXPLORE_FAILED"
+    network_failed_state = "NETWORK_ERROR"
 
     def __init__(self, proxy_instance):
         super().__init__(proxy_instance)
         self.sessions = SessionManager(llm_token_limit=proxy_instance._llm.token_limit)
+        self.steps: dict[str, ExploreStep] = {}
+
         self.todo_tool = TaskTool()
         self.file_tool = FileTool(
             default_files={
@@ -46,6 +69,12 @@ class ExplorePrompt(Prompt):
         self.repeater_tool = RepeaterTool()
         self.intruder_tool = IntruderTool()
         self.reporter_tool = ReporterTool()
+
+    def is_status_path(self, path: str) -> bool:
+        return path.startswith(self.status_prefix)
+
+    def manages_path(self, path: str) -> bool:
+        return path in {self.start_path, self.continue_path, self.finish_path} or self.is_status_path(path)
 
     def build_session_request(self, session_id: str, tools: list[dict]) -> dict[str, Any]:
         """Build LLM request from session conversation."""
@@ -70,8 +99,8 @@ class ExplorePrompt(Prompt):
         return session
 
     async def handle_request(self, flow: mitmproxy.http.HTTPFlow) -> None:
-        """Route to appropriate handler based on path."""
-        path = flow.request.path.split("?", 1)[0]
+        path = self._request_path(flow)
+        status_step_id, status_action = self._parse_status_path(path)
 
         try:
             if path == self.start_path:
@@ -80,31 +109,33 @@ class ExplorePrompt(Prompt):
                 await self.handle_continue_request(flow)
             elif path == self.finish_path:
                 await self.handle_finish_request(flow)
+            elif status_step_id and status_action == "retry":
+                await self.handle_retry_request(flow, status_step_id)
+            elif status_step_id:
+                await self.handle_status_request(flow, status_step_id)
         except json.JSONDecodeError as e:
             logger.error("Invalid JSON in request: %s", str(e))
-            flow.response = mitmproxy.http.Response.make(
-                400,
-                json.dumps({"error": f"Invalid JSON: {str(e)}"}),
-                {"Content-Type": "application/json"},
+            flow.response = self._json_response(
+                HTTPStatus.BAD_REQUEST,
+                {"error": f"Invalid JSON: {str(e)}"},
             )
-        except (APIError, ValueError) as e:
-            logger.error("LLM API error: %s", str(e))
-            session_id = flow.request.headers.get(self.session_header_key)
-            if session_id:
-                self.sessions.delete_session(session_id)
-            flow.response = mitmproxy.http.Response.make(
-                500,
-                json.dumps({"error": f"LLM API request failed: {str(e)}"}),
-                {"Content-Type": "application/json"},
+        except (APIError, ValueError, KeyError) as e:
+            logger.error("Explore request failed: %s", str(e))
+            flow.response = self._json_response(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": f"Explore request failed: {str(e)}"},
             )
+
+    async def handle_response(self, flow: mitmproxy.http.HTTPFlow) -> None:  # noqa: ARG002
+        """Explore responses are fully built in the request hook."""
+        return
 
     async def handle_start_request(self, flow: mitmproxy.http.HTTPFlow) -> None:
         """Handle start request by creating new conversation: /start."""
-        request_data = json.loads(flow.request.text)
+        request_data = json.loads(flow.request.text or "{}")
         issue_definition = request_data.get("issue_definition", {})
-
-        session_id = str(uuid.uuid4())
-        session = self.create_session(session_id)
+        exploration_id = str(uuid.uuid4())
+        session = self.create_session(exploration_id)
         session.issue_definition = issue_definition
 
         # Add system message
@@ -118,7 +149,7 @@ class ExplorePrompt(Prompt):
         )
 
         # Add memory
-        memory_content = self._create_memory_message(session_id)
+        memory_content = self._create_memory_message(exploration_id)
         session.conversation.add_message(
             ConversationMessage(
                 name="memory",
@@ -128,24 +159,30 @@ class ExplorePrompt(Prompt):
         )
 
         # Add user message
-        user_content = self._create_start_user_content(flow.request.text)
+        user_content = self._create_start_user_content(flow.request.text or "{}")
         session.conversation.add_message(ConversationMessage(role="user", content=user_content))
 
-        # Send LLM request
-        logger.info("Session %s: Created with %s messages", display_sessid(session_id), len(session.conversation))
-        llm_request = self.build_session_request(session_id, self._get_tools_for_request(session_id))
-        flow.request.headers[self.session_header_key] = session_id
-        await self.proxy_request(flow, llm_request)
+        logger.info("Session %s: Created with %s messages", display_sessid(exploration_id), len(session.conversation))
+
+        step = self._create_step(exploration_id)
+        step.task = asyncio.create_task(self._run_step(step, self._run_llm_until_burp_tool(exploration_id)))
+
+        flow.response = self._json_response(
+            HTTPStatus.ACCEPTED,
+            {
+                "step_id": step.step_id,
+                "poll_interval_seconds": step.poll_interval_seconds,
+            },
+        )
 
     async def handle_continue_request(self, flow: mitmproxy.http.HTTPFlow) -> None:
         """Handle continue request by extending existing conversation: /continue."""
-        request_data = json.loads(flow.request.text)
+        request_data = json.loads(flow.request.text or "{}")
         session_id = request_data.get(self.session_id_key, "")
-
         session = self.sessions.get_session(session_id)
         if not session:
             logger.error("Session %s: Unknown/expired session", display_sessid(session_id))
-            flow.response = mitmproxy.http.Response.make(400, b"Unknown session_id")
+            flow.response = self._json_response(HTTPStatus.BAD_REQUEST, {"error": "Unknown session_id"})
             return
 
         user_message = None
@@ -157,68 +194,215 @@ class ExplorePrompt(Prompt):
                 "to ensure nothing important is lost."
             )
 
-        await self._process_and_continue(
-            flow, session_id, request_data.get("tool_results", []), user_message, "Continuing"
+        step = self._create_step(session_id, expose_exploration_id_while_running=True)
+        step.task = asyncio.create_task(
+            self._run_continue_step(
+                step.step_id,
+                request_data.get("tool_results", []),
+                user_message,
+                is_finishing=False,
+            )
+        )
+
+        flow.response = self._json_response(
+            HTTPStatus.ACCEPTED,
+            {
+                "step_id": step.step_id,
+                "exploration_id": session_id,
+                "poll_interval_seconds": step.poll_interval_seconds,
+            },
         )
 
     async def handle_finish_request(self, flow: mitmproxy.http.HTTPFlow) -> None:
         """Handle finish request by providing final summary: /finish."""
-        request_data = json.loads(flow.request.text)
+        request_data = json.loads(flow.request.text or "{}")
         session_id = request_data.get(self.session_id_key, "")
-
         session = self.sessions.get_session(session_id)
         if not session:
             logger.error("Session %s: Unknown/expired session", display_sessid(session_id))
-            flow.response = mitmproxy.http.Response.make(400, b"Unknown session_id")
+            flow.response = self._json_response(HTTPStatus.BAD_REQUEST, {"error": "Unknown session_id"})
             return
 
-        session.is_finishing = True
-
-        user_message = (
-            'The user has clicked "Finish Task" to end this exploration session. Based on all the tool '
-            "results and exploration performed so far, provide a comprehensive final summary using the "
-            'reporter" tool, calling out any uncertainty if the evidence is incomplete.'
+        step = self._create_step(session_id, expose_exploration_id_while_running=True)
+        step.task = asyncio.create_task(
+            self._run_continue_step(
+                step.step_id,
+                request_data.get("tool_results", []),
+                (
+                    'The user has clicked "Finish Task" to end this exploration session. Based on all the tool '
+                    "results and exploration performed so far, provide a comprehensive final summary using the "
+                    'reporter" tool, calling out any uncertainty if the evidence is incomplete.'
+                ),
+                is_finishing=True,
+            )
         )
 
-        await self._process_and_continue(
-            flow, session_id, request_data.get("tool_results", []), user_message, "Finishing"
+        flow.response = self._json_response(
+            HTTPStatus.ACCEPTED,
+            {
+                "step_id": step.step_id,
+                "exploration_id": session_id,
+                "poll_interval_seconds": step.poll_interval_seconds,
+            },
         )
 
-    async def handle_response(self, flow: mitmproxy.http.HTTPFlow) -> None:
-        """Handle LLM response, looping until Burp tools are used."""
-        session_id = flow.request.headers.get(self.session_header_key)
-        session = self.sessions.get_session(session_id) if session_id else None
+    async def handle_status_request(self, flow: mitmproxy.http.HTTPFlow, step_id: str) -> None:
+        step = self.steps.get(step_id)
+        if not step:
+            flow.response = self._json_response(HTTPStatus.NOT_FOUND, {"error": "Unknown step_id"})
+            return
 
+        flow.response = self._json_response(HTTPStatus.OK, self._status_payload(step))
+
+    async def handle_retry_request(self, flow: mitmproxy.http.HTTPFlow, step_id: str) -> None:
+        previous_step = self.steps.get(step_id)
+        if not previous_step:
+            flow.response = self._json_response(HTTPStatus.NOT_FOUND, {"error": "Unknown step_id"})
+            return
+
+        if previous_step.exploration_id is None:
+            flow.response = self._json_response(HTTPStatus.BAD_REQUEST, {"error": "Step cannot be retried"})
+            return
+
+        session = self.sessions.get_session(previous_step.exploration_id)
         if not session:
-            self.sessions.process_session_response(
-                flow,
-                self.session_header_key,
-                self.session_id_key,
-                response_modifier=self.process_response_json,
-            )
+            flow.response = self._json_response(HTTPStatus.BAD_REQUEST, {"error": "Unknown session_id"})
             return
 
-        while True:
-            self.sessions.process_session_response(
-                flow,
-                self.session_header_key,
-                self.session_id_key,
-                response_modifier=self.process_response_json,
+        previous_step.retry_count += 1
+
+        if previous_step.error:
+            tools = self._get_tools_for_request(previous_step.exploration_id)
+            tool_names = [t["function"]["name"] for t in tools]
+            session.conversation.add_message(
+                ConversationMessage(
+                    role="user",
+                    content=(
+                        f"Your previous tool call failed with the following errors:\n"
+                        f"{previous_step.error}\n\n"
+                        f"Available tools: {', '.join(tool_names)}\n"
+                        f"Please fix the issue and try again."
+                    ),
+                )
             )
 
-            response_json = json.loads(flow.response.text)
-            burp_tool_calls = response_json.get("tool_calls", [])
+        step = self._create_step(
+            previous_step.exploration_id,
+            expose_exploration_id_while_running=True,
+        )
+        step.task = asyncio.create_task(self._run_step(step, self._run_llm_until_burp_tool(previous_step.exploration_id)))
 
-            if burp_tool_calls:
-                break
+        flow.response = self._json_response(
+            HTTPStatus.ACCEPTED,
+            {
+                "step_id": step.step_id,
+                "exploration_id": previous_step.exploration_id,
+                "poll_interval_seconds": step.poll_interval_seconds,
+            },
+        )
+
+    def _request_path(self, flow: mitmproxy.http.HTTPFlow) -> str:
+        return flow.request.path.split("?", 1)[0]
+
+    def _parse_status_path(self, path: str) -> tuple[str, str | None]:
+        if not path.startswith(self.status_prefix):
+            return "", None
+
+        suffix = path.removeprefix(self.status_prefix)
+        parts = suffix.split("/")
+
+        if len(parts) == 1 and parts[0]:
+            return parts[0], None
+        if len(parts) == 2 and parts[0] and parts[1] == "retry":
+            return parts[0], "retry"
+        return "", None
+
+    def _create_step(self, exploration_id: str, expose_exploration_id_while_running: bool = False) -> ExploreStep:
+        step = ExploreStep(
+            step_id=str(uuid.uuid4()),
+            exploration_id=exploration_id,
+            expose_exploration_id_while_running=expose_exploration_id_while_running,
+        )
+        self.steps[step.step_id] = step
+        return step
+
+    async def _run_continue_step(
+        self,
+        step_id: str,
+        tool_results: list[dict[str, Any]],
+        user_message: str | None,
+        is_finishing: bool,
+    ) -> None:
+        step = self.steps[step_id]
+        session_id = step.exploration_id
+        session = self.sessions.get_session(session_id) if session_id else None
+        if not session or not session_id:
+            step.state = self.failed_state
+            step.error = "Unknown session_id"
+            return
+
+        if is_finishing:
+            session.is_finishing = True
+
+        self._append_tool_result_messages(tool_results, session_id)
+
+        if user_message:
+            session.conversation.add_message(ConversationMessage(role="user", content=user_message))
+
+        log_action = "Finishing" if is_finishing else "Continuing"
+        logger.info(
+            "Session %s: %s with %s messages",
+            display_sessid(session_id),
+            log_action,
+            len(session.conversation),
+        )
+
+        await self._run_step(step, self._run_llm_until_burp_tool(session_id))
+
+    async def _run_step(
+        self,
+        step: ExploreStep,
+        job: asyncio.Future,
+    ) -> None:
+        await asyncio.sleep(0)
+        step.state = "PROCESSING"
+
+        try:
+            response, should_delete_session = await job
+            step.response = response
+            step.state = "COMPLETE"
+
+            if should_delete_session and step.exploration_id:
+                self.sessions.delete_session(step.exploration_id)
+        except Exception as e:  # noqa: BLE001
+            step.state = self._failure_state_for_exception(e)
+            step.error = str(e)
+            logger.error("Explore step %s failed: %s", display_sessid(step.step_id), str(e))
+
+    async def _run_llm_until_burp_tool(self, session_id: str) -> tuple[dict[str, Any], bool]:
+        """Handle LLM response, looping until Burp tools are used."""
+        while True:
+            session = self.sessions.get_session(session_id)
+            if not session:
+                raise KeyError(f"Unknown session_id: {session_id}")
+
+            self._refresh_session_messages(session_id)
+            llm_request = self.build_session_request(session_id, self._get_tools_for_request(session_id))
+            message_obj, eval_info = await self.proxy._llm.request(llm_request)
+
+            self._record_llm_response(session, session_id, message_obj, eval_info)
+            response_json, finalize_session = self._normalize_llm_message(session, session_id, message_obj)
+
+            if response_json["tool_calls"]:
+                return response_json, finalize_session
 
             # Only internal tools were used (no Burp tools)
-            logger.info(
-                "Session %s: Only internal tools used",
-                display_sessid(session_id),
-            )
-
+            logger.info("Session %s: Only internal tools used", display_sessid(session_id))
             self._append_tool_result_messages([], session_id)
+
+            session = self.sessions.get_session(session_id)
+            if not session:
+                raise KeyError(f"Unknown session_id: {session_id}")
 
             # Clear history if needed
             if session.needs_history_clear:
@@ -228,28 +412,58 @@ class ExplorePrompt(Prompt):
                 session.needs_history_clear = False
 
             # Provide feedback to proceed with testing
-            feedback = (
-                "You've updated your internal state. You may proceed with active testing using the available tools."
+            session.conversation.add_message(ConversationMessage(role="user", content=self._create_internal_tools_feedback(session)))
+
+    def _record_llm_response(
+        self,
+        session: Session,
+        session_id: str,
+        message_obj: dict[str, Any],
+        eval_info: dict[str, Any] | None,
+    ) -> None:
+
+        content = message_obj.get("content") or ""
+        tool_calls = message_obj.get("tool_calls")
+        has_tool_calls = isinstance(tool_calls, list) and len(tool_calls) > 0
+
+        if content or has_tool_calls:
+            session.conversation.add_message(
+                ConversationMessage(
+                    role="assistant",
+                    content=content,
+                    tool_calls=tool_calls if has_tool_calls else None,
+                )
             )
-            session.conversation.add_message(ConversationMessage(role="user", content=feedback))
-            await self._update_and_send_llm_request(flow, session_id)
+        else:
+            session.conversation.add_message(ConversationMessage(role="assistant", content=""))
+            session.conversation.add_message(
+                ConversationMessage(
+                    role="user",
+                    content=(
+                        "You must select and call at least one tool. "
+                        "Please choose an appropriate tool based on the current task."
+                    ),
+                )
+            )
 
-    def process_response_json(self, response_json: dict[str, Any], flow: mitmproxy.http.HTTPFlow) -> dict[str, Any]:
+        if eval_info:
+            self.sessions._handle_token_usage(session_id, {"eval_info": eval_info})  # noqa: SLF001
+
+    def _normalize_llm_message(self, session: Session | None, session_id: str, message_obj: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         """Parse OpenAI tool calls and normalize for Burp Suite."""
-        session_id = flow.request.headers.get(self.session_header_key)
-        session = self.sessions.get_session(session_id) if session_id else None
-
-        message = response_json.get("message", {})
-        tool_calls_from_llm = message.get("tool_calls", [])
+        tool_calls_from_llm = message_obj.get("tool_calls", [])
 
         burp_tool_calls: list[dict[str, Any]] = []
         finalize_session = False
-        top_level_step_title, top_level_step_action = "", ""
+        top_level_step_title = ""
+        top_level_step_action = ""
 
         for llm_tool_call in tool_calls_from_llm:
             if not isinstance(llm_tool_call, dict):
                 logger.warning(
-                    "Skipping non-dict tool call: %s (type: %s)", llm_tool_call, type(llm_tool_call).__name__
+                    "Skipping non-dict tool call: %s (type: %s)",
+                    llm_tool_call,
+                    type(llm_tool_call).__name__,
                 )
                 continue
 
@@ -257,12 +471,7 @@ class ExplorePrompt(Prompt):
             function_data = llm_tool_call.get("function", {})
             tool_name = function_data.get("name", "")
             arguments_json = function_data.get("arguments", "{}")
-
-            logger.debug("Processing tool call: id=%s, name=%s", tool_call_id, tool_name)
-            logger.debug("Raw arguments JSON: %s", arguments_json)
-
             arguments = json.loads(arguments_json)
-            logger.debug("Parsed arguments type: %s, value: %s", type(arguments).__name__, arguments)
 
             # Process internal tools
             if self._process_internal_tool_call(tool_name, arguments, tool_call_id, session, session_id):
@@ -288,36 +497,111 @@ class ExplorePrompt(Prompt):
 
             burp_tool_calls.append(processed_call)
 
-        response_json["step_title"] = top_level_step_title
-        response_json["step_action"] = top_level_step_action
-        response_json["tool_calls"] = burp_tool_calls
+        return (
+            {
+                "exploration_id": session_id,
+                "step_title": top_level_step_title,
+                "step_action": top_level_step_action,
+                "tool_calls": burp_tool_calls,
+            },
+            finalize_session,
+        )
 
-        if finalize_session and session_id:
-            self.sessions.delete_session(session_id)
+    def _status_payload(self, step: ExploreStep) -> dict[str, Any]:
+        public_state = self._public_state(step)
+        payload: dict[str, Any] = {
+            "step_id": step.step_id,
+            "state": public_state,
+            "retry_count": step.retry_count,
+        }
 
-        return response_json
+        include_exploration_id = (
+            step.exploration_id
+            and (
+                step.expose_exploration_id_while_running
+                or public_state == "COMPLETE"
+                or public_state not in {"PENDING", "PROCESSING"}
+            )
+        )
+        if include_exploration_id:
+            payload["exploration_id"] = step.exploration_id
+
+        if public_state in {"PENDING", "PROCESSING"}:
+            payload["poll_interval_seconds"] = step.poll_interval_seconds
+        elif public_state == "COMPLETE" and step.response is not None:
+            payload["response"] = step.response
+        else:
+            payload["error"] = step.error or "Explore step failed"
+
+        return payload
+
+    def _public_state(self, step: ExploreStep) -> str:
+        if step.state in {"PENDING", "PROCESSING", "COMPLETE"}:
+            return step.state
+        if step.state == self.network_failed_state:
+            return self.network_failed_state
+        if step.retry_count >= self.max_error_retries:
+            return self.exhausted_failed_state
+        return self.failed_state
+
+    def _failure_state_for_exception(self, error: Exception) -> str:
+        if isinstance(error, (APIConnectionError, APITimeoutError, APIStatusError, ConnectionError, TimeoutError, OSError)):
+            return self.network_failed_state
+        return self.failed_state
+
+    def _json_response(self, status_code: HTTPStatus, payload: dict[str, Any]) -> mitmproxy.http.Response:
+        return mitmproxy.http.Response.make(
+            status_code,
+            json.dumps(payload),
+            {"Content-Type": "application/json"},
+        )
+
+    def _refresh_session_messages(self, session_id: str) -> None:
+        session = self.sessions.get_session(session_id)
+        if not session:
+            raise KeyError(f"Unknown session_id: {session_id}")
+
+        session.conversation.update_content("memory", self._create_memory_message(session_id))
+        session.conversation.update_content("system_prompt", self._create_system_message(session.issue_definition))
+
+    def _create_internal_tools_feedback(self, session: Session) -> str:
+        if session.tasks_initialized and session.tasks and not self.todo_tool.are_all_tasks_completed(session):
+            incomplete = [
+                f"#{i}: {task.get('title', '')}"
+                for i, task in enumerate(session.tasks)
+                if not task.get("completed", False)
+            ]
+
+            if incomplete:
+                return (
+                    "You've updated your internal state. The `reporter` tool is not available yet because there are "
+                    f"incomplete tasks remaining: {'; '.join(incomplete)}. Complete or delete all remaining tasks "
+                    "before trying to use `reporter`. In the meantime, proceed with the available tools."
+                )
+
+        return "You've updated your internal state. You may proceed with active testing using the available tools."
 
     def _get_tools_for_request(self, session_id: str) -> list[dict]:
         """Get list of available tools in OpenAI format based on session state."""
         session = self.sessions.get_session(session_id)
 
-        if session.needs_history_clear:
+        if session and session.needs_history_clear:
             tools = [self.file_tool.get_schema()]
-        elif session.is_finishing:
+        elif session and session.is_finishing:
             tools = [self.reporter_tool.get_schema()]
         else:
-            tools = []
-            tools.append(self.todo_tool.get_schema(session))
-            tools.append(self.file_tool.get_schema())
-            tools.append(self.repeater_tool.get_schema())
-            tools.append(self.intruder_tool.get_schema())
+            tools = [
+                self.todo_tool.get_schema(session),
+                self.file_tool.get_schema(),
+                self.repeater_tool.get_schema(),
+                self.intruder_tool.get_schema(),
+            ]
 
-            if session.tasks_initialized and self.todo_tool.are_all_tasks_completed(session):
+            if session and session.tasks_initialized and self.todo_tool.are_all_tasks_completed(session):
                 tools.append(self.reporter_tool.get_schema())
 
         tool_names = [t["function"]["name"] for t in tools]
         logger.debug("Session %s: Available tools for this round: %s", display_sessid(session_id), tool_names)
-
         return tools
 
     def _process_internal_tool_call(
@@ -370,7 +654,6 @@ class ExplorePrompt(Prompt):
 
         todo_xml_string = self.todo_tool.get_system_prompt_section(session)
         files_xml_string = self.file_tool.get_system_prompt_section(session)
-
         return f"<memory>{todo_xml_string}{files_xml_string}</memory>"
 
     def _create_start_user_content(self, payload: str) -> str:
@@ -413,7 +696,6 @@ Evidence:
         root = doc.createElement("system_prompt")
         doc.appendChild(root)
 
-        # Metadata
         if issue_name == "REQUEST_RESPONSE_EXPLORE":
             invocation_source = "Burp Suite Repeater"
             task_description = (
@@ -432,6 +714,7 @@ Evidence:
             if background:
                 vulnerability_info += f"\n**Background**: {background}"
 
+        # Metadata
         metadata = doc.createElement("metadata")
         metadata.appendChild(
             doc.createCDATASection(
@@ -540,49 +823,6 @@ However, even with a negative conclusion some uncertainty remains, since testing
 
         return doc.toxml()
 
-    async def _process_and_continue(
-        self,
-        flow: mitmproxy.http.HTTPFlow,
-        session_id: str,
-        tool_results: list,
-        user_message: str | None,
-        log_action: str,
-    ) -> None:
-        """Process tool results, optionally add user message, and continue LLM conversation."""
-        session = self.sessions.get_session(session_id)
-        if not session:
-            return
-
-        self._append_tool_result_messages(tool_results, session_id)
-
-        if user_message:
-            session.conversation.add_message(ConversationMessage(role="user", content=user_message))
-
-        logger.info(
-            "Session %s: %s with %s messages",
-            display_sessid(session_id),
-            log_action,
-            len(session.conversation),
-        )
-        flow.request.headers[self.session_header_key] = session_id
-        await self._update_and_send_llm_request(flow, session_id)
-
-    async def _update_and_send_llm_request(self, flow: mitmproxy.http.HTTPFlow, session_id: str) -> None:
-        """Update memory/system messages and send LLM request."""
-        session = self.sessions.get_session(session_id)
-        if not session:
-            return
-
-        memory_content = self._create_memory_message(session_id)
-        session.conversation.update_content("memory", memory_content)
-
-        issue_definition = session.issue_definition
-        system_content = self._create_system_message(issue_definition)
-        session.conversation.update_content("system_prompt", system_content)
-
-        llm_request = self.build_session_request(session_id, self._get_tools_for_request(session_id))
-        await self.proxy_request(flow, llm_request)
-
     def _format_single_tool_result(self, result_data: str, tool_type: str | None) -> str:
         """Format a single tool result based on its type."""
         is_empty = not result_data or not result_data.strip()
@@ -616,14 +856,12 @@ However, even with a negative conclusion some uncertainty remains, since testing
             tool_id = result.get("tool_id", "")
             result_data = result.get("result", "")
             tool_type = tool_id_map.get(tool_id)
-
             formatted_content = self._format_single_tool_result(result_data, tool_type)
 
             # Add timing information
             if tool_id in tool_timing:
                 elapsed_seconds = time.time() - tool_timing[tool_id]
-                timing_info = self._format_timing_info(elapsed_seconds)
-                formatted_content = timing_info + formatted_content
+                formatted_content = self._format_timing_info(elapsed_seconds) + formatted_content
                 del tool_timing[tool_id]
 
             session.conversation.add_message(

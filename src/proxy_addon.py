@@ -63,19 +63,15 @@ class ProxyAddon:
                 flow.request.headers["Portswigger-Burp-Ai-Token"] = self._burp_ai_token
             return
 
-        path = flow.request.path
+        path = flow.request.path.split("?", 1)[0]
         if path == "/burp/balance":
             logger.info("Balance check requested")
-            flow.response = responses.CreditBalanceResponse()
+            flow.response = responses.CreditBalanceHeadResponse()
         elif path == self._explain_prompt.explain_path:
             await self._explain_prompt.handle_request(flow)
         elif path == self._montoya_prompt.montoya_path:
             await self._montoya_prompt.handle_request(flow)
-        elif path in [
-            self._explore_prompt.start_path,
-            self._explore_prompt.continue_path,
-            self._explore_prompt.finish_path,
-        ]:
+        elif self._explore_prompt.manages_path(path):
             await self._explore_prompt.handle_request(flow)
         else:
             logger.warning("This request was unhandled in burpai-proxy")
@@ -99,18 +95,14 @@ class ProxyAddon:
 
         flow.response.headers.update(responses.headers())
 
-        path = flow.request.path
+        path = flow.request.path.split("?", 1)[0]
         if path == "/burp/balance":
             pass
         elif path == self._explain_prompt.explain_path:
             await self._explain_prompt.handle_response(flow)
         elif path == self._montoya_prompt.montoya_path:
             await self._montoya_prompt.handle_response(flow)
-        elif path in [
-            self._explore_prompt.start_path,
-            self._explore_prompt.continue_path,
-            self._explore_prompt.finish_path,
-        ]:
+        elif self._explore_prompt.manages_path(path):
             await self._explore_prompt.handle_response(flow)
         else:
             logger.warning("This response was unhandled in burpai-proxy")

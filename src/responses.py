@@ -1,5 +1,4 @@
 import datetime
-import json
 import time
 from http import HTTPStatus
 
@@ -44,15 +43,11 @@ class Response(mitmproxy.http.Response):
         )
 
 
-class CreditBalanceResponse(Response):
+class CreditBalanceHeadResponse(Response):
     def __init__(self) -> None:
+        head_headers = headers() | {"Content-Type": "text/html"}
         super().__init__(
             status_code=HTTPStatus.OK,
-            headers=headers(),
-            content=json.dumps(
-                {
-                    "balance": 1337,
-                    "timestamp": datetime.datetime.now(tz=datetime.UTC).isoformat().replace("+00:00", "Z"),
-                }
-            ),
+            headers=head_headers,
+            content="",
         )
