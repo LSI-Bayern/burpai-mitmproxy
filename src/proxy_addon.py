@@ -25,6 +25,9 @@ class ProxyAddon:
         self._burp_ai_domain: str = burp_ai_domain
         self._config = config
 
+        self._backend_url = urllib.parse.urlparse(config["llm_url"])
+        self._backend_is_tls = self._backend_url.scheme == "https"
+
         if self._passthrough:
             logger.info("Passthrough mode enabled - requests will be forwarded to official Burp AI server")
 
@@ -45,9 +48,6 @@ class ProxyAddon:
 
         if not await self._llm.check_llm_setup():
             sys.exit(1)
-
-        self._backend_url = urllib.parse.urlparse(self._llm.base_url)
-        self._backend_is_tls = self._backend_url.scheme == "https"
 
         self._explain_prompt = ExplainThisPrompt(self)
         self._montoya_prompt = MontoyaPrompt(self)
