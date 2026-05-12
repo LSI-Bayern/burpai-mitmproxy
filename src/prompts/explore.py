@@ -54,13 +54,21 @@ class ExplorePrompt(Prompt):
         self.file_tool = FileTool(
             default_files={
                 "target.md": {
-                    "description": "What you know about the target: URLs, endpoints, parameters, technologies, structure",
+                    "description": (
+                        "What you know about the target: URLs, endpoints, parameters, technologies, structure"
+                    ),
                 },
                 "findings.md": {
-                    "description": "Key results worth highlighting in the final report: vulnerabilities, analysis outcomes, or anything notable",
+                    "description": (
+                        "Key results worth highlighting in the final report: vulnerabilities, analysis outcomes, "
+                        "or anything notable"
+                    ),
                 },
                 "observations.md": {
-                    "description": "Application behavior noted along the way: response patterns, filtering, encoding, error patterns",
+                    "description": (
+                        "Application behavior noted along the way: response patterns, filtering, encoding, "
+                        "error patterns"
+                    ),
                 },
             }
         )
@@ -326,11 +334,13 @@ class ExplorePrompt(Prompt):
         suffix = path.removeprefix(self.status_prefix)
         parts = suffix.split("/")
 
-        if len(parts) == 1 and parts[0]:
-            return parts[0], None
-        if len(parts) == 2 and parts[0] and parts[1] == "retry":
-            return parts[0], "retry"
-        return "", None
+        match parts:
+            case [step_id] if step_id:
+                return step_id, None
+            case [step_id, "retry"] if step_id:
+                return step_id, "retry"
+            case _:
+                return "", None
 
     def _create_step(self, exploration_id: str, expose_exploration_id_while_running: bool = False) -> ExploreStep:
         step = ExploreStep(
@@ -449,7 +459,9 @@ class ExplorePrompt(Prompt):
                 session.needs_history_clear = False
 
             # Provide feedback to proceed with testing
-            session.conversation.add_message(ConversationMessage(role="user", content=self._create_internal_tools_feedback(session)))
+            session.conversation.add_message(
+                ConversationMessage(role="user", content=self._create_internal_tools_feedback(session))
+            )
 
     def _record_llm_response(
         self,
@@ -486,7 +498,9 @@ class ExplorePrompt(Prompt):
         if eval_info:
             self.sessions._handle_token_usage(session_id, {"eval_info": eval_info})  # noqa: SLF001
 
-    def _normalize_llm_message(self, session: Session | None, session_id: str, message_obj: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    def _normalize_llm_message(
+        self, session: Session | None, session_id: str, message_obj: dict[str, Any]
+    ) -> tuple[dict[str, Any], bool]:
         """Parse OpenAI tool calls and normalize for Burp Suite."""
         tool_calls_from_llm = message_obj.get("tool_calls", [])
 
@@ -582,7 +596,15 @@ class ExplorePrompt(Prompt):
         return self.failed_state
 
     def _failure_state_for_exception(self, error: Exception) -> str:
-        if isinstance(error, (APIConnectionError, APITimeoutError, APIStatusError, ConnectionError, TimeoutError, OSError)):
+        network_errors = (
+            APIConnectionError,
+            APITimeoutError,
+            APIStatusError,
+            ConnectionError,
+            TimeoutError,
+            OSError,
+        )
+        if isinstance(error, network_errors):
             return self.network_failed_state
         return self.failed_state
 
@@ -754,7 +776,8 @@ Evidence:
                 vulnerability_info += f"\n**Background**: {background}"
 
         if is_analysis_profile:
-            core_mission_text = """Your job is to carry out the user's instruction on the HTTP traffic and evidence provided. Workflow:
+            core_mission_text = """\
+Your job is to carry out the user's instruction on the HTTP traffic and evidence provided. Workflow:
 
 1. **Plan**: capture the user's instruction as one or more tasks with `update_tasks`
 2. **Act**: use `repeater` and `intruder` to send the HTTP interactions the task needs
@@ -777,15 +800,19 @@ Encode values based on where they land in the request:
 - Read responses carefully: relevant detail is often in headers, status codes, and small body cues, so don't skim
 - Stay within the user's instruction. If they asked for X, don't pivot to Y mid-session
 - Document what you observe and what's blocked"""
-            evaluation_text = """**Judge outcomes from HTTP responses** (no browser execution environment available). Conclusions must rest on responses you actually observed.
+            evaluation_text = """\
+**Judge outcomes from HTTP responses** (no browser execution environment available). \
+Conclusions must rest on responses you actually observed.
 
 **When to conclude:**
 - Done: you have what the user's instruction asked for. Complete your tasks and call `reporter`.
-- Exhausted: further requests clearly won't add to the answer (404s, dead endpoints, the data isn't there). Document what you found, complete your tasks, and call `reporter` noting the limitation.
+- Exhausted: further requests clearly won't add to the answer (404s, dead endpoints, the data isn't there). \
+Document what you found, complete your tasks, and call `reporter` noting the limitation.
 
 Some uncertainty usually remains. Flag it when it matters to what the user asked for."""
         else:
-            core_mission_text = """Your job is to carry out the user's instruction from the user message above using the tools available. Workflow:
+            core_mission_text = """\
+Your job is to carry out the user's instruction from the user message above using the tools available. Workflow:
 
 1. **Plan**: lay out your approach with `update_tasks`
 2. **Act**: use `repeater` and `intruder` to drive the HTTP interactions the task needs
@@ -819,11 +846,15 @@ Encode values based on where they land in the request:
 This list is incomplete and context-dependent. Apply what fits the task.
 
 Always document what works and what's blocked."""
-            evaluation_text = """**Judge outcomes from HTTP responses** (no browser execution environment available). Conclusions must rest on responses you actually observed.
+            evaluation_text = """\
+**Judge outcomes from HTTP responses** (no browser execution environment available). \
+Conclusions must rest on responses you actually observed.
 
 **When to conclude:**
-- Positive: responses contain the evidence the task called for, e.g. a working exploit payload, extracted data, or enumerated resources
-- Exhausted: further attempts clearly won't yield more, e.g. filters consistently block, WAF/rate limiting prevents progress, or you've covered the plausible approaches
+- Positive: responses contain the evidence the task called for, e.g. a working exploit payload, \
+extracted data, or enumerated resources
+- Exhausted: further attempts clearly won't yield more, e.g. filters consistently block, \
+WAF/rate limiting prevents progress, or you've covered the plausible approaches
 
 Some uncertainty usually remains. Flag it when it matters to what the user asked for."""
 

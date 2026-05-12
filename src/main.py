@@ -19,7 +19,7 @@ LISTEN_HOST = "127.0.0.1"
 class BodyOnlyDumper(dumper.Dumper):
     """Mitmproxy Dumper that prints request URL + body but suppresses headers."""
 
-    def _echo_headers(self, headers):
+    def _echo_headers(self, _headers):
         return
 
 
