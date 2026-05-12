@@ -89,7 +89,6 @@ def create_analysis(build_dir, data_files):
         excludes=[
             "tkinter",
             "sqlite3",
-            "unittest",
             "doctest",
             "pydoc",
             "setuptools",
