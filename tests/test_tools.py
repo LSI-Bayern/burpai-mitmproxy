@@ -130,14 +130,13 @@ class TestIntruderTool:
         assert "payloads" in schema["function"]["parameters"]["properties"]
         assert len(schema["function"]["description"]) > 0
 
-    def test_process_with_default_encoding(self):
+    def test_process_passes_payloads_verbatim(self):
         tool = IntruderTool()
         tool_call = {
             "step_title": "XSS Test",
             "step_action": "Testing XSS payloads",
             "request_template": "GET /search?q=§payload§ HTTP/1.1\r\nHost: example.org",
-            "payloads": ["<script>alert(1)</script>", "test value"],
-            "auto_url_encode": True,
+            "payloads": ["<script>alert(1)</script>", "test value", "%3Cpre-encoded%3E", '{"user":"test"}'],
         }
 
         result = tool.process(tool_call)
@@ -145,37 +144,12 @@ class TestIntruderTool:
         assert result["tool_name"] == "intruder"
         assert result["step_title"] == "XSS Test"
         assert result["arguments"]["request"] == "GET /search?q=§payload§ HTTP/1.1\r\nHost: example.org"
-        assert result["arguments"]["payloads"][0] == "%3Cscript%3Ealert(1)%3C%2Fscript%3E"
-        assert result["arguments"]["payloads"][1] == "test%20value"
-
-    def test_process_with_encoding_enabled(self):
-        tool = IntruderTool()
-        tool_call = {
-            "step_title": "Path fuzzing",
-            "step_action": "Testing with path characters",
-            "request_template": "GET /test§payload§ HTTP/1.1",
-            "payloads": ["test/path", "value"],
-            "auto_url_encode": True,
-        }
-
-        result = tool.process(tool_call)
-
-        assert result["arguments"]["payloads"][0] == "test%2Fpath"
-        assert result["arguments"]["payloads"][1] == "value"
-
-    def test_process_with_no_encoding(self):
-        tool = IntruderTool()
-        tool_call = {
-            "step_title": "No encoding",
-            "step_action": "Raw payloads",
-            "request_template": "POST /api HTTP/1.1",
-            "payloads": ['{"user":"test"}'],
-            "auto_url_encode": False,
-        }
-
-        result = tool.process(tool_call)
-
-        assert result["arguments"]["payloads"][0] == '{"user":"test"}'
+        assert result["arguments"]["payloads"] == [
+            "<script>alert(1)</script>",
+            "test value",
+            "%3Cpre-encoded%3E",
+            '{"user":"test"}',
+        ]
 
 
 class TestReporterTool:

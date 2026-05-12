@@ -1,6 +1,5 @@
 import csv
 import io
-import urllib.parse
 from typing import Any
 
 from src.tools.tool import Tool
@@ -17,22 +16,14 @@ class IntruderTool(Tool):
         _session_id="",
     ) -> dict[str, Any]:
         """Process a tool call and return the format expected by Burp. The tool call must conform to the schema."""
-        arguments = {"request": tool_call["request_template"]}
-
-        payloads: list[str] = []
-        for entry in tool_call["payloads"]:
-            if tool_call["auto_url_encode"]:
-                payloads.append(self._url_encode_chars(str(entry)))
-            else:
-                payloads.append(str(entry))
-
-        arguments["payloads"] = payloads
-
         return {
             "tool_name": "intruder",
             "step_title": tool_call["step_title"],
             "step_action": tool_call["step_action"],
-            "arguments": arguments,
+            "arguments": {
+                "request": tool_call["request_template"],
+                "payloads": [str(p) for p in tool_call["payloads"]],
+            },
         }
 
     def get_schema(self, _session=None) -> dict[str, Any]:
@@ -47,9 +38,6 @@ class IntruderTool(Tool):
                         "step_title": {"type": "string"},
                         "step_action": {"type": "string"},
                         "request_template": {"type": "string"},
-                        "auto_url_encode": {
-                            "type": "boolean",
-                        },
                         "payloads": {
                             "type": "array",
                             "items": {"type": "string"},
@@ -60,7 +48,6 @@ class IntruderTool(Tool):
                         "step_action",
                         "request_template",
                         "payloads",
-                        "auto_url_encode",
                     ],
                     "additionalProperties": False,
                 },
@@ -135,10 +122,11 @@ class IntruderTool(Tool):
     def _get_documentation(self) -> str:
         return """The intruder sends many HTTP requests by inserting different payloads into a template. Afterwards, it returns a summary with status codes, content lengths, and truncated response bodies. Mark insertion points with §placeholder§ in your template. Great for testing lots of variations quickly - the more payloads, the better.
 
-**ENCODING**: Set `auto_url_encode` to control payload encoding behavior.
-- `request_template`: YOU MUST encode the template yourself (except `§payload§` markers)
-- `payloads`: Provide raw payloads when `auto_url_encode: true`
-- For JSON contexts, set `auto_url_encode: false` and manually escape payloads
+**ENCODING**: Both `request_template` and `payloads` are sent verbatim. The proxy does NOT auto-encode anything, so you're responsible for encoding correctly for the context the payload lands in:
+- URL/form parameters and path segments -> URL-encode special characters yourself (`<script>` -> `%3Cscript%3E`, space -> `%20`)
+- A trailing slash in a path payload? Write `dashboard/` and it goes through as a path separator. Write `dashboard%2F` and it goes through as a literal `%2F`. Pick deliberately.
+- JSON bodies -> JSON-escape values yourself (`a"b\\` -> `a\\"b\\\\`)
+- If you want a literal `&`, `=`, `?`, or other structural character inside a query-string value, you must encode it (`%26`, `%3D`, `%3F`) or it will break out of the parameter
 
 **IMPORTANT**: The Intruder tool only returns the first 200 bytes of each response BODY. This truncation is fixed and cannot be changed.
 - Status codes, `content-length` and `content-type` are always fully captured
@@ -149,48 +137,36 @@ class IntruderTool(Tool):
 - `step_title`: Brief title for this testing step
 - `step_action`: Detailed explanation of what you're doing and why
 - `request_template`: HTTP request template as a single string with a `§payload§` marker for fuzzing. Only ONE marker is supported. Separate lines with CRLF (`\r\n`), but you may deviate from this if you are testing non-standard behavior.
-- `payloads`: Array of string payloads to insert at the `§payload§` marker.
-- `auto_url_encode`: Boolean to enable/disable automatic URL-encoding. When `true`, special characters like spaces, slashes, brackets, and quotes are automatically encoded (specifically: `` ./\\=<>?+&*;:"{}|^`# ``). When `false`, payloads are sent as-is.
+- `payloads`: Array of string payloads to insert at the `§payload§` marker. Sent exactly as written.
 
 **Examples**:
 
-**Directory Fuzzing**:
+**Directory Fuzzing** (path segment, no encoding needed for simple names):
 ```json
 {
   "step_title": "Discovering hidden API endpoints",
   "step_action": "Fuzzing /api/ path with common endpoint names to find accessible resources",
   "request_template": "GET /api/§payload§ HTTP/1.1\r\nHost: example.org\r\n\r\n",
-  "payloads": ["users/list", "admin config", "../etc/passwd"],
-  "auto_url_encode": true
+  "payloads": ["users", "users/list", "admin%20config", "..%2F..%2Fetc%2Fpasswd"]
 }
 ```
 
-**XSS/SQL Injection Testing**:
+**XSS/SQL Injection Testing** (query parameter, encode special chars):
 ```json
 {
   "step_title": "Testing search parameter for XSS and SQLi",
   "step_action": "Sending various XSS and SQL injection payloads to identify if the parameter is vulnerable",
   "request_template": "GET /search?q=§payload§ HTTP/1.1\r\nHost: example.org\r\n\r\n",
-  "payloads": ["<script>console.log(1)</script>", "test' OR '1'='1--"],
-  "auto_url_encode": true
+  "payloads": ["%3Cscript%3Econsole.log(1)%3C%2Fscript%3E", "test%27%20OR%20%271%27%3D%271--"]
 }
 ```
 
-**JSON Context (Manual Encoding)**:
+**JSON Context** (escape quotes/backslashes, no URL-encoding):
 ```json
 {
   "step_title": "Testing JSON user parameter",
-  "step_action": "Testing for injection in JSON context with auto-encoding disabled",
+  "step_action": "Testing for injection in JSON context",
   "request_template": "POST /api HTTP/1.1\r\nHost: example.org\r\nContent-Type: application/json\r\n\r\n{\"user\":\"§payload§\"}",
-  "payloads": ["admin", "test\";}//", "' OR '1'='1"],
-  "auto_url_encode": false
+  "payloads": ["admin", "test\\\";}//", "' OR '1'='1"]
 }
 ```"""  # noqa: E501
-
-    def _url_encode_chars(self, text: str) -> str:
-        chars_to_encode = ' ./\\=<>?+&*;:"{}|^`#'
-        result = text
-        for char in chars_to_encode:
-            encoded = urllib.parse.quote(char, safe="")
-            result = result.replace(char, encoded)
-        return result

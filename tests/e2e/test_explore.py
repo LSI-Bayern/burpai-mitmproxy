@@ -201,8 +201,7 @@ async def test_intruder_tool_call(fake_llm, burp):
                 "step_title": "Fuzz parameter",
                 "step_action": "Test SQL injection payloads",
                 "request_template": "GET /search?q=§test§ HTTP/1.1\r\nHost: example.org\r\n\r\n",
-                "payloads": ["' OR 1=1--", "\" OR 1=1--"],
-                "auto_url_encode": True,
+                "payloads": ["%27%20OR%201%3D1--", "%22%20OR%201%3D1--"],
             })
         ],
     })
