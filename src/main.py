@@ -3,6 +3,7 @@ import asyncio
 import sys
 from urllib.parse import urlparse, urlunparse
 
+from mitmproxy.addons import dumper
 from mitmproxy.options import Options
 from mitmproxy.tools.dump import DumpMaster
 from mitmproxy.tools.web.master import WebMaster
@@ -15,12 +16,20 @@ from src.utils import logger, is_port_available, init_logger
 LISTEN_HOST = "127.0.0.1"
 
 
+class BodyOnlyDumper(dumper.Dumper):
+    """Mitmproxy Dumper that prints request URL + body but suppresses headers."""
+
+    def _echo_headers(self, headers):
+        return
+
+
 async def master_loop(config: dict):
     opts = Options()
     opts.listen_host = LISTEN_HOST
     opts.listen_port = config["port"]
     opts.confdir = config["mitmproxy_config_dir"]
     debug_enabled = config["debug"]
+    debug_full_enabled = config["debug_full"]
 
     # Skip cert validation when mitmproxy connects to LLM server in server_connect hook
     # Purely cosmetic to prevent TLS errors for localhost or self-signed certs
@@ -47,11 +56,15 @@ async def master_loop(config: dict):
     if config["web"]:
         master = WebMaster(opts)
         logger.info("Web interface at [cyan]http://%s:%s[/cyan]", master.options.web_host, master.options.web_port)
+    elif debug_enabled and not debug_full_enabled:
+        master = DumpMaster(opts, with_termlog=True, with_dumper=False)
+        master.addons.add(BodyOnlyDumper())
+        master.options.flow_detail = 3
     else:
         master = DumpMaster(opts, with_termlog=True, with_dumper=True)
 
         # flow_detail can only be configured afterwards:
-        master.options.flow_detail = 3 if debug_enabled else 1
+        master.options.flow_detail = 3 if debug_full_enabled else 1
 
     logger.info("Proxy server listening at [cyan]%s:%s[/cyan]", LISTEN_HOST, opts.listen_port)
 
@@ -108,7 +121,18 @@ def setup_argument_parser() -> argparse.ArgumentParser:
         metavar="TOKEN",
         help="Replace the Portswigger-Burp-Ai-Token header value in passthrough mode",
     )
-    mode_group.add_argument("-d", "--debug", action="store_true", help="Enable debug logging in the console output")
+    mode_group.add_argument(
+        "-d",
+        "--debug",
+        action="store_true",
+        help="Enable debug logging and dump request/response bodies (without headers)",
+    )
+    mode_group.add_argument(
+        "--debug-full",
+        dest="debug_full",
+        action="store_true",
+        help="Like --debug, but also dump request/response headers",
+    )
     mode_group.add_argument("-w", "--web", action="store_true", help="Launch mitmweb interface for mitmproxy debugging")
 
     # Maintenance commands
@@ -126,7 +150,7 @@ def main():
     parser = setup_argument_parser()
     args = parser.parse_args()
 
-    init_logger(debug=args.debug)
+    init_logger(debug=args.debug or args.debug_full)
 
     settings = Settings()
 
@@ -159,6 +183,7 @@ def main():
     # Process CLI-only args
     config["passthrough"] = args.passthrough
     config["debug"] = args.debug
+    config["debug_full"] = args.debug_full
     config["web"] = args.web
     if args.burp_ai_token is not None:
         config["burp_ai_token"] = args.burp_ai_token
