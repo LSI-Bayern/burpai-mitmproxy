@@ -23,7 +23,6 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "ruff",
-    "uv-secure",
     "pytest",
     "pytest-mock",
     "pytest-cov",
