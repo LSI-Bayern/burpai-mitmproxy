@@ -168,9 +168,9 @@ async def test_error_state_and_retry(fake_llm, burp):
     fake_llm.enqueue_response(repeater_response("tool-retry"))
     resp = await burp.explore_retry(step_id)
     assert resp.status_code == 202
-    assert resp.json()["step_id"] != step_id
+    assert resp.json()["step_id"] == step_id
 
-    retry_status = await burp.poll_until_terminal(resp.json()["step_id"])
+    retry_status = await burp.poll_until_terminal(step_id)
     assert retry_status["state"] == "COMPLETE"
 
 

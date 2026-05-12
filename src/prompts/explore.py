@@ -54,15 +54,13 @@ class ExplorePrompt(Prompt):
         self.file_tool = FileTool(
             default_files={
                 "target.md": {
-                    "description": (
-                        "Attack surface inventory: URLs, endpoints, parameters, technologies, auth mechanisms"
-                    ),
+                    "description": "What you know about the target: URLs, endpoints, parameters, technologies, structure",
                 },
                 "findings.md": {
-                    "description": "Confirmed vulnerabilities with severity, evidence, and exploitation details",
+                    "description": "Key results worth highlighting in the final report: vulnerabilities, analysis outcomes, or anything notable",
                 },
                 "observations.md": {
-                    "description": "Application behavior: filtering, encoding, WAF, bypasses, error patterns",
+                    "description": "Application behavior noted along the way: response patterns, filtering, encoding, error patterns",
                 },
             }
         )
@@ -301,18 +299,20 @@ class ExplorePrompt(Prompt):
                 )
             )
 
-        step = self._create_step(
-            previous_step.exploration_id,
-            expose_exploration_id_while_running=True,
+        previous_step.state = "PENDING"
+        previous_step.error = None
+        previous_step.response = None
+        previous_step.expose_exploration_id_while_running = True
+        previous_step.task = asyncio.create_task(
+            self._run_step(previous_step, self._run_llm_until_burp_tool(previous_step.exploration_id))
         )
-        step.task = asyncio.create_task(self._run_step(step, self._run_llm_until_burp_tool(previous_step.exploration_id)))
 
         flow.response = self._json_response(
             HTTPStatus.ACCEPTED,
             {
-                "step_id": step.step_id,
+                "step_id": previous_step.step_id,
                 "exploration_id": previous_step.exploration_id,
-                "poll_interval_seconds": step.poll_interval_seconds,
+                "poll_interval_seconds": previous_step.poll_interval_seconds,
             },
         )
 
@@ -733,7 +733,9 @@ Evidence:
         root = doc.createElement("system_prompt")
         doc.appendChild(root)
 
-        if issue_name == "REQUEST_RESPONSE_EXPLORE":
+        is_analysis_profile = issue_name == "REQUEST_RESPONSE_EXPLORE"
+
+        if is_analysis_profile:
             invocation_source = "Burp Suite Repeater"
             task_description = (
                 "You are performing analysis and testing on HTTP traffic based on user instructions and provided "
@@ -751,6 +753,80 @@ Evidence:
             if background:
                 vulnerability_info += f"\n**Background**: {background}"
 
+        if is_analysis_profile:
+            core_mission_text = """Your job is to carry out the user's instruction on the HTTP traffic and evidence provided. Workflow:
+
+1. **Plan**: capture the user's instruction as one or more tasks with `update_tasks`
+2. **Act**: use `repeater` and `intruder` to send the HTTP interactions the task needs
+3. **Document**: record what you observe with `update_files`
+4. **Iterate**: refine based on what the responses show
+5. **Report**: complete all your tasks, then deliver the answer via `reporter`
+
+**Mindset:**
+- Follow the user's instruction faithfully. Don't bolt on testing they didn't ask for.
+- Ground conclusions in what the responses actually show, not assumptions.
+- Be concise when the instruction is concise."""
+            methodology_text = """**Encoding:**
+Encode values based on where they land in the request:
+- URL/form parameters -> URL-encode (`<script>` -> `%3Cscript%3E`)
+- Form data -> URL-encode (`key=<val>` -> `key=%3Cval%3E`)
+- JSON bodies -> JSON-escape (value `a"b\\` -> `{"x":"a\\"b\\\\"}`)
+
+**Principles:**
+- Non-destructive: NEVER use `DROP TABLE`, `DELETE`, `rm -rf`, or anything else with lasting side effects
+- Read responses carefully: relevant detail is often in headers, status codes, and small body cues, so don't skim
+- Stay within the user's instruction. If they asked for X, don't pivot to Y mid-session
+- Document what you observe and what's blocked"""
+            evaluation_text = """**Judge outcomes from HTTP responses** (no browser execution environment available). Conclusions must rest on responses you actually observed.
+
+**When to conclude:**
+- Done: you have what the user's instruction asked for. Complete your tasks and call `reporter`.
+- Exhausted: further requests clearly won't add to the answer (404s, dead endpoints, the data isn't there). Document what you found, complete your tasks, and call `reporter` noting the limitation.
+
+Some uncertainty usually remains. Flag it when it matters to what the user asked for."""
+        else:
+            core_mission_text = """Your job is to carry out the user's instruction from the user message above using the tools available. Workflow:
+
+1. **Plan**: lay out your approach with `update_tasks`
+2. **Act**: use `repeater` and `intruder` to drive the HTTP interactions the task needs
+3. **Document**: record what you find with `update_files`
+4. **Iterate**: adapt based on what the responses show
+5. **Report**: deliver the result via `reporter` when the task is done
+
+**Mindset:**
+- Stick to the scope the user asked for. Don't drift into adjacent work they didn't request
+- Ground conclusions in observed HTTP responses, not assumptions
+- Be persistent and thorough: aim for conclusive evidence rather than weak indicators"""
+            methodology_text = """**Encoding:**
+Encode values based on where they land in the request:
+- URL/form parameters -> URL-encode (`<script>` -> `%3Cscript%3E`)
+- Form data -> URL-encode (`key=<val>` -> `key=%3Cval%3E`)
+- JSON bodies -> JSON-escape (value `a"b\\` -> `{"x":"a\\"b\\\\"}`)`
+
+**Principles:**
+- Non-destructive: NEVER use `DROP TABLE`, `DELETE`, `rm -rf`, or anything else with lasting side effects
+- Considerate of production impact: prefer `console.log()` over `alert()` and similarly low-impact proofs
+- Be persistent and thorough: try multiple angles before concluding the responses can't give you what you need
+
+**When inputs get filtered, blocked, or responses don't look right:**
+1. Start with a simple input to understand what the endpoint is actually doing
+2. Case variations: `<ScRiPt>`, `SeLeCt`, mixed-case
+3. Encoding: URL encode (`%3Cscript%3E`), double encode, unicode
+4. Comments: `'/**/OR/**/1=1`, `UNION/*comment*/SELECT`
+5. Alternative syntax: `<svg onload=...>`, `$(cmd)`, `{{7*7}}` (SSTI), `....//` (traversal)
+6. Concatenation: breaking up keywords, using string concat operators
+
+This list is incomplete and context-dependent. Apply what fits the task.
+
+Always document what works and what's blocked."""
+            evaluation_text = """**Judge outcomes from HTTP responses** (no browser execution environment available). Conclusions must rest on responses you actually observed.
+
+**When to conclude:**
+- Positive: responses contain the evidence the task called for, e.g. a working exploit payload, extracted data, or enumerated resources
+- Exhausted: further attempts clearly won't yield more, e.g. filters consistently block, WAF/rate limiting prevents progress, or you've covered the plausible approaches
+
+Some uncertainty usually remains. Flag it when it matters to what the user asked for."""
+
         # Metadata
         metadata = doc.createElement("metadata")
         metadata.appendChild(
@@ -764,22 +840,7 @@ Evidence:
 
         # Core mission
         core_mission = doc.createElement("core_mission")
-        core_mission.appendChild(
-            doc.createCDATASection(
-                """Your job is to carry out the user's instruction from the user message above using the tools available. Workflow:
-
-1. **Plan**: lay out your approach with `update_tasks`
-2. **Act**: use `repeater` and `intruder` to drive the HTTP interactions the task needs
-3. **Document**: record what you find with `update_files`
-4. **Iterate**: adapt based on what the responses show
-5. **Report**: deliver the result via `reporter` when the task is done
-
-**Mindset:**
-- Stick to the scope the user asked for. Don't drift into adjacent work they didn't request
-- Ground conclusions in observed HTTP responses, not assumptions
-- Be persistent and thorough: aim for conclusive evidence rather than weak indicators"""  # noqa: E501
-            )
-        )
+        core_mission.appendChild(doc.createCDATASection(core_mission_text))
         root.appendChild(core_mission)
 
         # Tool usage
@@ -801,47 +862,12 @@ Evidence:
 
         # Methodology
         methodology = doc.createElement("methodology")
-        methodology.appendChild(
-            doc.createCDATASection(
-                """**Encoding:**
-Encode values based on where they land in the request:
-- URL/form parameters -> URL-encode (`<script>` -> `%3Cscript%3E`)
-- Form data -> URL-encode (`key=<val>` -> `key=%3Cval%3E`)
-- JSON bodies -> JSON-escape (value `a"b\\` -> `{"x":"a\\"b\\\\"}`)`
-
-**Principles:**
-- Non-destructive: NEVER use `DROP TABLE`, `DELETE`, `rm -rf`, or anything else with lasting side effects
-- Considerate of production impact: prefer `console.log()` over `alert()` and similarly low-impact proofs
-- Be persistent and thorough: try multiple angles before concluding the responses can't give you what you need
-
-**When inputs get filtered, blocked, or responses don't look right:**
-1. Start with a simple input to understand what the endpoint is actually doing
-2. Case variations: `<ScRiPt>`, `SeLeCt`, mixed-case
-3. Encoding: URL encode (`%3Cscript%3E`), double encode, unicode
-4. Comments: `'/**/OR/**/1=1`, `UNION/*comment*/SELECT`
-5. Alternative syntax: `<svg onload=...>`, `$(cmd)`, `{{7*7}}` (SSTI), `....//` (traversal)
-6. Concatenation: breaking up keywords, using string concat operators
-
-This list is incomplete and context-dependent. Apply what fits the task.
-
-Always document what works and what's blocked."""  # noqa: E501
-            )
-        )
+        methodology.appendChild(doc.createCDATASection(methodology_text))
         root.appendChild(methodology)
 
         # Evaluation criteria
         evaluation_criteria = doc.createElement("evaluation_criteria")
-        evaluation_criteria.appendChild(
-            doc.createCDATASection(
-                """**Judge outcomes from HTTP responses** (no browser execution environment available). Conclusions must rest on responses you actually observed.
-
-**When to conclude:**
-- Positive: responses contain the evidence the task called for, e.g. a working exploit payload, extracted data, or enumerated resources
-- Exhausted: further attempts clearly won't yield more, e.g. filters consistently block, WAF/rate limiting prevents progress, or you've covered the plausible approaches
-
-Some uncertainty usually remains. Flag it when it matters to what the user asked for."""  # noqa: E501
-            )
-        )
+        evaluation_criteria.appendChild(doc.createCDATASection(evaluation_text))
         root.appendChild(evaluation_criteria)
 
         # Progress tracking reminder
