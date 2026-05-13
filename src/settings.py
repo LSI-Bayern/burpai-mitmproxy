@@ -78,7 +78,7 @@ class Settings:
             ),
             "model": SettingField(
                 type=str,
-                default="qwen3-coder-next:q8_0-128k",
+                default="qwen3.6:35b-128k",
                 prompt="Enter the model name",
             ),
             "token_limit": SettingField(

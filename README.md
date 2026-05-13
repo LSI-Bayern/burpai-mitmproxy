@@ -71,10 +71,10 @@ Ollama's default context size is 2048 tokens. For larger contexts, either set
 Example using a custom model:
 
 ```bash
-ollama pull qwen3-coder-next:q8_0
-ollama create qwen3-coder-next:q8_0-128k -f <(cat <<'EOF'
-FROM qwen3-coder-next:q8_0
-PARAMETER num_ctx 32000
+ollama pull qwen3.6:35b
+ollama create qwen3.6:35b-128k -f <(cat <<'EOF'
+FROM qwen3.6:35b
+PARAMETER num_ctx 128000
 EOF
 )
 ```
