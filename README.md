@@ -81,8 +81,7 @@ EOF
 
 ## Contributing
 
-Currently only a subset of Burp's functionality has been implemented. I'm
-hoping to receive PRs for additional request examples (see `doc/requests.md`) as
-well as implementations for them.
+Currently only a subset of Burp's functionality has been implemented. See
+`tests/e2e/` for endpoint reference.
 
 For development, install dev dependencies: `uv sync --group dev`

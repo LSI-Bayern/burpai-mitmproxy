@@ -334,6 +334,6 @@ async def test_reporter_unlocks_when_all_tasks_completed(fake_llm, burp):
     final_tools = [t["function"]["name"] for t in fake_llm.received_requests[-1]["tools"]]
     assert "reporter" in final_tools
 
-    # Session should be deleted after reporter, so continue returns 400
+    # Session is finalized after reporter, so continue returns 400
     resp = await burp.explore_continue(exploration_id, [])
     assert resp.status_code == 400
